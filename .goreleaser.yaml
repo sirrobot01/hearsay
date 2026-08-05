@@ -1,0 +1,37 @@
+version: 2
+
+project_name: hearsay
+
+builds:
+  - main: ./cmd/hearsay
+    binary: hearsay
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [tar.gz]
+    name_template: "hearsay_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - typo
