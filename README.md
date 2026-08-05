@@ -18,9 +18,15 @@ A wrong source loses weight automatically. There is no voting, no global reputat
 
 ## Install
 
-Download the archive for your system from the [releases page](https://github.com/sirrobot01/hearsay/releases). Unpack it. Put the `hearsay` binary in your `PATH`.
+On Linux or macOS, run the install script:
 
-Builds are available for Linux, macOS, and Windows, on amd64 and arm64. Verify downloads against `checksums.txt`.
+```
+curl -fsSL https://hearsay.decypharr.com/install.sh | sh
+```
+
+The script installs the correct binary for your system, verifies its checksum, and registers a service (systemd on Linux, launchd on macOS). The daemon then runs and starts on boot.
+
+On Windows, download the zip from the [releases page](https://github.com/sirrobot01/hearsay/releases). Releases cover Linux, macOS, and Windows, on amd64 and arm64, with a `checksums.txt`.
 
 To build from source instead:
 

@@ -8,10 +8,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var version = "dev"
+
 func main() {
 	root := &cobra.Command{
 		Use:          "hearsay",
 		Short:        "Share observations about external state, as byproducts of work already being done",
+		Version:      version,
 		SilenceUsage: true,
 	}
 	root.AddCommand(serveCmd(), torznabCmd())
