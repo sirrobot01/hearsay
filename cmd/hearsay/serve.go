@@ -1,12 +1,9 @@
-// Command hearsayd is the standalone Hearsay daemon: it keeps the
-// local store, participates in the network, and serves the HTTP query
-// API for stacks that do not embed the library in-process.
 package main
 
 import (
 	"context"
 	"encoding/hex"
-	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,25 +12,37 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/sirrobot01/hearsay"
 	"github.com/sirrobot01/hearsay/debrid"
 	"github.com/sirrobot01/hearsay/transport"
 	"github.com/sirrobot01/hearsay/usenet"
 )
 
-func main() {
-	configPath := flag.String("config", "", "path to config file (optional; defaults are fully functional)")
-	listen := flag.String("listen", "", "HTTP listen address (overrides config)")
-	flag.Parse()
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-
-	cfg, err := loadConfig(*configPath)
-	if err != nil {
-		log.Error("config", "err", err)
-		os.Exit(1)
+func serveCmd() *cobra.Command {
+	var configPath, listen string
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Run the daemon: local store, network sync, HTTP query API",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return serve(configPath, listen)
+		},
 	}
-	if *listen != "" {
-		cfg.Listen = *listen
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "path to config file (optional; defaults are fully functional)")
+	cmd.Flags().StringVar(&listen, "listen", "", "HTTP listen address (overrides config)")
+	return cmd
+}
+
+func serve(configPath, listen string) error {
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	if listen != "" {
+		cfg.Listen = listen
 	}
 
 	var domains []hearsay.Domain
@@ -45,8 +54,7 @@ func main() {
 	}
 	h, err := hearsay.New(cfg.Dir, domains...)
 	if err != nil {
-		log.Error("open store", "err", err)
-		os.Exit(1)
+		return err
 	}
 	defer h.Close()
 	log.Info("identity", "pubkey", "ed25519:"+hex.EncodeToString(h.Identity()))
@@ -57,16 +65,13 @@ func main() {
 	if cfg.Hearsay.Enabled {
 		var interval time.Duration
 		if cfg.Hearsay.Interval != "" {
-			interval, err = time.ParseDuration(cfg.Hearsay.Interval)
-			if err != nil {
-				log.Error("config", "err", err)
-				os.Exit(1)
+			if interval, err = time.ParseDuration(cfg.Hearsay.Interval); err != nil {
+				return err
 			}
 		}
 		node, err := transport.Listen(filepath.Join(cfg.Dir, "swarm"), cfg.Hearsay.Port)
 		if err != nil {
-			log.Error("transport", "err", err)
-			os.Exit(1)
+			return err
 		}
 		defer node.Close()
 		for _, d := range domains {
@@ -74,8 +79,7 @@ func main() {
 			for _, f := range cfg.Hearsay.Follow {
 				key, err := f.Key()
 				if err != nil {
-					log.Error("config", "err", err)
-					os.Exit(1)
+					return err
 				}
 				node.AddFeed(d.Namespace(), key)
 			}
@@ -101,7 +105,7 @@ func main() {
 	}()
 	log.Info("listening", "addr", cfg.Listen)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Error("http", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("http: %w", err)
 	}
+	return nil
 }

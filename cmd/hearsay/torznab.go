@@ -1,15 +1,8 @@
-// Command hearsay-torznab sits between an *arr and its Torznab
-// indexer. It forwards every request upstream unchanged, and on
-// search results it annotates each release with cache-confidence
-// attributes and reorders claimed-cached releases first. No changes
-// to existing tools: point the *arr at this proxy instead of the
-// indexer.
 package main
 
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,7 +10,37 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 )
+
+func torznabCmd() *cobra.Command {
+	p := &proxy{
+		client: &http.Client{Timeout: 2 * time.Minute},
+		log:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+	var listen string
+	cmd := &cobra.Command{
+		Use:   "torznab",
+		Short: "Run the annotating Torznab proxy between an *arr and its indexer",
+		Long: "Forwards every request upstream unchanged. On search results it adds\n" +
+			"hearsay confidence attributes to each release and reorders claimed-cached\n" +
+			"releases first. On any failure the upstream result passes through untouched.",
+		Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			p.upstream = strings.TrimSuffix(p.upstream, "/")
+			p.hearsayd = strings.TrimSuffix(p.hearsayd, "/")
+			p.log.Info("proxying", "listen", listen, "upstream", p.upstream, "ns", p.ns)
+			return http.ListenAndServe(listen, p)
+		},
+	}
+	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8478", "listen address")
+	cmd.Flags().StringVar(&p.upstream, "upstream", "", "upstream Torznab base URL, e.g. http://prowlarr:9696")
+	cmd.Flags().StringVar(&p.hearsayd, "hearsayd", "http://127.0.0.1:8477", "hearsay daemon base URL")
+	cmd.Flags().StringVar(&p.ns, "ns", "debrid.realdebrid.cached", "namespace to query")
+	cmd.MarkFlagRequired("upstream")
+	return cmd
+}
 
 var searchTypes = map[string]bool{
 	"search": true, "tvsearch": true, "movie": true, "music": true, "book": true,
@@ -29,30 +52,6 @@ type proxy struct {
 	ns       string
 	client   *http.Client
 	log      *slog.Logger
-}
-
-func main() {
-	listen := flag.String("listen", "127.0.0.1:8478", "listen address")
-	upstream := flag.String("upstream", "", "upstream Torznab base URL, e.g. http://prowlarr:9696 (required)")
-	hearsayd := flag.String("hearsayd", "http://127.0.0.1:8477", "hearsayd base URL")
-	ns := flag.String("ns", "debrid.realdebrid.cached", "namespace to query")
-	flag.Parse()
-	if *upstream == "" {
-		fmt.Fprintln(os.Stderr, "hearsay-torznab: -upstream is required")
-		os.Exit(2)
-	}
-	p := &proxy{
-		upstream: strings.TrimSuffix(*upstream, "/"),
-		hearsayd: strings.TrimSuffix(*hearsayd, "/"),
-		ns:       *ns,
-		client:   &http.Client{Timeout: 2 * time.Minute},
-		log:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
-	}
-	p.log.Info("proxying", "listen", *listen, "upstream", p.upstream, "ns", p.ns)
-	if err := http.ListenAndServe(*listen, p); err != nil {
-		p.log.Error("http", "err", err)
-		os.Exit(1)
-	}
 }
 
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {

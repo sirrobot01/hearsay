@@ -25,27 +25,26 @@ This rule is part of the protocol. The `Domain` interface has no probe method. T
 
 | Component | Description |
 |---|---|
-| `hearsay` | The core library. Embed it in a Go application. |
-| `hearsayd` | A standalone daemon with an HTTP query API. |
-| `hearsay-torznab` | A proxy between an *arr and its Torznab indexer. It reorders releases by cache confidence. |
+| `hearsay` (library) | The core library. Embed it in a Go application. |
+| `hearsay serve` | The daemon with an HTTP query API. |
+| `hearsay torznab` | A proxy between an *arr and its Torznab indexer. It reorders releases by cache confidence. |
 | `debrid` | Adapter: debrid cache availability. Boolean. |
 | `usenet` | Adapter: usenet completeness by backbone. Scalar. |
 
 ## Install
 
-Build the binaries:
+Build the CLI:
 
 ```
-go build ./cmd/hearsayd
-go build ./cmd/hearsay-torznab
+go build ./cmd/hearsay
 ```
 
 ## Start the daemon
 
-Start `hearsayd` with no configuration:
+Start the daemon with no configuration:
 
 ```
-./hearsayd
+./hearsay serve
 ```
 
 The daemon creates a keypair on the first run. It stores data in your user configuration directory. It publishes your observations and follows discovered publishers. You do not need an account, a server, a port forward, or a key ceremony. The daemon operates correctly behind CGNAT.
@@ -71,7 +70,7 @@ adapters:
 Start the daemon with the file:
 
 ```
-./hearsayd -config config.yaml
+./hearsay serve --config config.yaml
 ```
 
 ## Query the daemon
@@ -114,7 +113,7 @@ POST /v1/outcomes
 Point your *arr at the proxy instead of the indexer:
 
 ```
-./hearsay-torznab -upstream http://prowlarr:9696 -hearsayd http://127.0.0.1:8477
+./hearsay torznab --upstream http://prowlarr:9696 --hearsayd http://127.0.0.1:8477
 ```
 
 The proxy forwards each request unchanged. On search results, it adds `hearsay_confidence` and `hearsay_cached` attributes to each release. It moves claimed-cached releases to the top. If anything fails, it returns the upstream result untouched.
@@ -135,7 +134,7 @@ if a.Confidence > 0.8 { /* your threshold, your call */ }
 h.Report("debrid.realdebrid.cached", infohash, wasInstant)
 ```
 
-Add the `transport.Syncer` to participate in the network. See `cmd/hearsayd` for the full wiring.
+Add the `transport.Syncer` to participate in the network. See `cmd/hearsay` for the full wiring.
 
 ## Add a domain
 
