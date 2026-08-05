@@ -42,8 +42,10 @@ type Node struct {
 }
 
 // Listen starts the swarm client, its DHT servers, and the gossip
-// listener. dir stores generation blobs for seeding.
-func Listen(dir string, port int) (*Node, error) {
+// listener. dir stores generation blobs for seeding. Ports of 0 pick
+// random ports; connectable nodes pin them so a firewall can open
+// them.
+func Listen(dir string, port, gossipPort int) (*Node, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -65,7 +67,7 @@ func Listen(dir string, port int) (*Node, error) {
 			n.dhts = append(n.dhts, w.Server)
 		}
 	}
-	n.gossip, err = net.Listen("tcp", ":0")
+	n.gossip, err = net.Listen("tcp", fmt.Sprintf(":%d", gossipPort))
 	if err != nil {
 		client.Close()
 		return nil, err
@@ -127,8 +129,10 @@ func (n *Node) Seed(blob []byte) (metainfo.Hash, error) {
 	sum := sha256.Sum256(blob)
 	name := hex.EncodeToString(sum[:]) + ".gen"
 	path := filepath.Join(n.dir, name)
-	if err := os.WriteFile(path, blob, 0o644); err != nil {
-		return metainfo.Hash{}, err
+	if _, err := os.Stat(path); err != nil {
+		if err := os.WriteFile(path, blob, 0o644); err != nil {
+			return metainfo.Hash{}, err
+		}
 	}
 	info := metainfo.Info{PieceLength: 256 << 10}
 	if err := info.BuildFromFilePath(path); err != nil {

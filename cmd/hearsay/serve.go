@@ -69,7 +69,7 @@ func serve(configPath, listen string) error {
 				return err
 			}
 		}
-		node, err := transport.Listen(filepath.Join(cfg.Dir, "swarm"), cfg.Hearsay.Port)
+		node, err := transport.Listen(filepath.Join(cfg.Dir, "swarm"), cfg.Hearsay.Port, cfg.Hearsay.GossipPort)
 		if err != nil {
 			return err
 		}

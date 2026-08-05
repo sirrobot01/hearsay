@@ -45,6 +45,7 @@ hearsay:
   publish: true        # contribute observations
   interval: "30m"      # publish and fetch cycle
   port: 0              # swarm listen port; 0 = random
+  gossip_port: 0       # discovery listen port; 0 = random
   follow: []           # empty = discover publishers on the DHT
 adapters:
   debrid: [realdebrid, alldebrid, torbox, premiumize]

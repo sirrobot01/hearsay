@@ -65,6 +65,11 @@ func (s *Syncer) sync(ctx context.Context) {
 		if s.Publish {
 			s.publish(ctx, ns, self)
 		}
+		// Feeds already retained on disk survive restarts and are
+		// re-advertised over gossip.
+		for _, feed := range s.Engine.Feeds(ns) {
+			s.Node.AddFeed(ns, feed)
+		}
 		s.Node.Discover(ctx, ns)
 		for _, feed := range s.Node.Feeds(ns) {
 			if feed == self {
@@ -114,6 +119,11 @@ func (s *Syncer) pull(ctx context.Context, ns, feed string) {
 		return
 	}
 	if latest := s.Engine.Latest(ns, feed); latest != nil && ptr.Gen <= latest.Seq {
+		// Already current: keep seeding the retained copy so this node
+		// stays a relay for unconnectable publishers across restarts.
+		if raw, err := latest.MarshalBinary(); err == nil {
+			s.Node.Seed(raw)
+		}
 		return
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
