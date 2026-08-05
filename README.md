@@ -18,6 +18,12 @@ A wrong source loses weight automatically. There is no voting, no global reputat
 
 ## Install
 
+Download the archive for your system from the [releases page](https://github.com/sirrobot01/hearsay/releases). Unpack it. Put the `hearsay` binary in your `PATH`.
+
+Builds are available for Linux, macOS, and Windows, on amd64 and arm64. Verify downloads against `checksums.txt`.
+
+To build from source instead:
+
 ```
 go build ./cmd/hearsay
 ```
