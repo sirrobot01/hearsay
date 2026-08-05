@@ -212,13 +212,11 @@ func (n *Node) Discover(ctx context.Context, ns string) {
 						continue
 					}
 					seen[addr] = struct{}{}
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
+					wg.Go(func() {
 						sem <- struct{}{}
 						defer func() { <-sem }()
 						n.exchange(ctx, addr)
-					}()
+					})
 				}
 			case <-ctx.Done():
 				break drain
