@@ -158,9 +158,9 @@ func (n *Node) Fetch(ctx context.Context, infohash string) ([]byte, error) {
 		t.Drop()
 		return nil, ctx.Err()
 	}
-	if t.Length() > MaxGenerationSize {
+	if t.Length() > MaxGenerationSize || t.Info().IsDir() {
 		t.Drop()
-		return nil, fmt.Errorf("transport: generation too large: %d", t.Length())
+		return nil, fmt.Errorf("transport: not a generation blob: %d bytes", t.Length())
 	}
 	t.DownloadAll()
 	ticker := time.NewTicker(250 * time.Millisecond)
@@ -173,7 +173,11 @@ func (n *Node) Fetch(ctx context.Context, infohash string) ([]byte, error) {
 			return nil, ctx.Err()
 		}
 	}
-	return os.ReadFile(filepath.Join(n.dir, t.Name()))
+	// The reader avoids trusting the info dict's file name with a
+	// filesystem path.
+	r := t.NewReader()
+	defer r.Close()
+	return io.ReadAll(r)
 }
 
 // Discover announces the gossip port on the namespace topic, walks
