@@ -1,0 +1,133 @@
+package transport
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"log/slog"
+	"time"
+
+	"github.com/sirrobot01/hearsay"
+)
+
+// Syncer runs the publish and subscribe loop: republish pointers
+// (BEP 44 items expire in about two hours), discover participants,
+// fetch newer generations from every known feed, and seed what we
+// publish and what we fetch.
+type Syncer struct {
+	Engine   *hearsay.Hearsay
+	Node     *Node
+	Publish  bool
+	Interval time.Duration
+	Log      *slog.Logger
+}
+
+func (s *Syncer) Run(ctx context.Context) {
+	if s.Interval <= 0 {
+		s.Interval = 30 * time.Minute
+	}
+	if s.Log == nil {
+		s.Log = slog.Default()
+	}
+	for ns := range s.namespaces() {
+		s.Node.Track(ns)
+	}
+	for {
+		s.sync(ctx)
+		select {
+		case <-time.After(s.Interval):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *Syncer) namespaces() map[string]hearsay.Domain {
+	m := map[string]hearsay.Domain{}
+	for _, d := range s.Engine.Domains() {
+		m[d.Namespace()] = d
+	}
+	return m
+}
+
+func (s *Syncer) sync(ctx context.Context) {
+	self := hex.EncodeToString(s.Engine.Identity())
+	for ns := range s.namespaces() {
+		if ctx.Err() != nil {
+			return
+		}
+		if s.Publish {
+			s.publish(ctx, ns, self)
+		}
+		s.Node.Discover(ctx, ns)
+		for _, feed := range s.Node.Feeds(ns) {
+			if feed == self {
+				continue
+			}
+			s.pull(ctx, ns, feed)
+		}
+	}
+}
+
+func (s *Syncer) publish(ctx context.Context, ns, self string) {
+	if g, err := s.Engine.Publish(ns); err != nil {
+		s.Log.Warn("publish failed", "ns", ns, "err", err)
+	} else if g != nil {
+		s.Log.Info("published generation", "ns", ns, "seq", g.Seq, "count", g.Count)
+	}
+	g := s.Engine.Latest(ns, self)
+	if g == nil {
+		return
+	}
+	raw, err := g.MarshalBinary()
+	if err != nil {
+		return
+	}
+	ih, err := s.Node.Seed(raw)
+	if err != nil {
+		s.Log.Warn("seed failed", "ns", ns, "err", err)
+		return
+	}
+	ptr := Pointer{Gen: g.Seq, InfoHash: ih.HexString(), Size: int64(len(raw)), BuiltAt: g.BuiltAt.Unix()}
+	putCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if err := s.Node.PutPointer(putCtx, s.Engine.PrivateIdentity(), ns, ptr); err != nil {
+		s.Log.Warn("pointer publish failed", "ns", ns, "err", err)
+	}
+}
+
+func (s *Syncer) pull(ctx context.Context, ns, feed string) {
+	pub, err := hex.DecodeString(feed)
+	if err != nil || len(pub) != 32 {
+		return
+	}
+	getCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	ptr, err := s.Node.GetPointer(getCtx, pub, ns)
+	cancel()
+	if err != nil {
+		return
+	}
+	if latest := s.Engine.Latest(ns, feed); latest != nil && ptr.Gen <= latest.Seq {
+		return
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	raw, err := s.Node.Fetch(fetchCtx, ptr.InfoHash)
+	cancel()
+	if err != nil {
+		s.Log.Warn("fetch failed", "ns", ns, "feed", feed[:8], "err", err)
+		return
+	}
+	parsed, err := hearsay.ParseGeneration(raw)
+	if err != nil || parsed.FeedID() != feed || parsed.Namespace != ns {
+		s.Log.Warn("generation does not match pointer", "ns", ns, "feed", feed[:8])
+		return
+	}
+	g, err := s.Engine.Ingest(raw)
+	if err != nil {
+		if !errors.Is(err, hearsay.ErrStale) {
+			s.Log.Warn("ingest rejected", "ns", ns, "feed", feed[:8], "err", err)
+		}
+		return
+	}
+	s.Log.Info("ingested generation", "ns", ns, "feed", feed[:8], "seq", g.Seq, "count", g.Count)
+}

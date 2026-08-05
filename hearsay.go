@@ -127,6 +127,12 @@ func (h *Hearsay) Identity() ed25519.PublicKey {
 	return h.id.Public().(ed25519.PublicKey)
 }
 
+// PrivateIdentity is the long-term signing key. The transport needs
+// it to sign BEP 44 pointer items.
+func (h *Hearsay) PrivateIdentity() ed25519.PrivateKey {
+	return h.id
+}
+
 func (h *Hearsay) Domain(ns string) (Domain, bool) {
 	d, ok := h.domains[ns]
 	return d, ok
