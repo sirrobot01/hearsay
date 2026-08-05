@@ -21,10 +21,7 @@ func newBloom(n int) *bloom {
 	}
 	m := uint64(math.Ceil(-float64(n) * math.Log(bloomFPR) / (math.Ln2 * math.Ln2)))
 	m = (m + 7) &^ 7
-	k := uint32(math.Round(float64(m) / float64(n) * math.Ln2))
-	if k < 1 {
-		k = 1
-	}
+	k := max(uint32(math.Round(float64(m)/float64(n)*math.Ln2)), 1)
 	return &bloom{k: k, bits: make([]byte, m/8)}
 }
 

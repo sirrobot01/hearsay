@@ -17,9 +17,11 @@ type Config struct {
 	Dir     string `yaml:"dir"`
 	Listen  string `yaml:"listen"`
 	Hearsay struct {
-		Enabled bool     `yaml:"enabled"`
-		Publish bool     `yaml:"publish"`
-		Follow  []Follow `yaml:"follow"`
+		Enabled  bool     `yaml:"enabled"`
+		Publish  bool     `yaml:"publish"`
+		Interval string   `yaml:"interval"`
+		Port     int      `yaml:"port"`
+		Follow   []Follow `yaml:"follow"`
 	} `yaml:"hearsay"`
 	Adapters struct {
 		Debrid []string `yaml:"debrid"`

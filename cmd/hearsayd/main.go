@@ -55,7 +55,15 @@ func main() {
 	defer stop()
 
 	if cfg.Hearsay.Enabled {
-		node, err := transport.Listen(filepath.Join(cfg.Dir, "swarm"), 0)
+		var interval time.Duration
+		if cfg.Hearsay.Interval != "" {
+			interval, err = time.ParseDuration(cfg.Hearsay.Interval)
+			if err != nil {
+				log.Error("config", "err", err)
+				os.Exit(1)
+			}
+		}
+		node, err := transport.Listen(filepath.Join(cfg.Dir, "swarm"), cfg.Hearsay.Port)
 		if err != nil {
 			log.Error("transport", "err", err)
 			os.Exit(1)
@@ -73,10 +81,11 @@ func main() {
 			}
 		}
 		syncer := &transport.Syncer{
-			Engine:  h,
-			Node:    node,
-			Publish: cfg.Hearsay.Publish,
-			Log:     log,
+			Engine:   h,
+			Node:     node,
+			Publish:  cfg.Hearsay.Publish,
+			Interval: interval,
+			Log:      log,
 		}
 		go syncer.Run(ctx)
 	} else {

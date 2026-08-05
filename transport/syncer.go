@@ -29,8 +29,14 @@ func (s *Syncer) Run(ctx context.Context) {
 	if s.Log == nil {
 		s.Log = slog.Default()
 	}
+	self := hex.EncodeToString(s.Engine.Identity())
 	for ns := range s.namespaces() {
 		s.Node.Track(ns)
+		// A publisher advertises its own feed, or gossip has nothing
+		// to spread.
+		if s.Publish {
+			s.Node.AddFeed(ns, self)
+		}
 	}
 	for {
 		s.sync(ctx)
