@@ -22,10 +22,11 @@ const (
 	AllDebrid  = "alldebrid"
 	TorBox     = "torbox"
 	Premiumize = "premiumize"
+	DebridLink = "debridlink"
 )
 
 // Providers lists the debrid services shipped with v1.
-var Providers = []string{RealDebrid, AllDebrid, TorBox, Premiumize}
+var Providers = []string{RealDebrid, AllDebrid, TorBox, Premiumize, DebridLink}
 
 type Domain struct {
 	provider string

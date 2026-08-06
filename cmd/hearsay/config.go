@@ -9,6 +9,9 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sirrobot01/hearsay/debrid"
+	"github.com/sirrobot01/hearsay/usenet"
 )
 
 // Config is fully functional with every field absent: zero-config is
@@ -69,11 +72,13 @@ func loadConfig(path string) (Config, error) {
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8477"
 	}
+	// Defaults come from the adapter packages so the daemon tracks
+	// every namespace the library can publish.
 	if c.Adapters.Debrid == nil {
-		c.Adapters.Debrid = []string{"realdebrid", "alldebrid", "torbox", "premiumize"}
+		c.Adapters.Debrid = debrid.Providers
 	}
 	if c.Adapters.Usenet == nil {
-		c.Adapters.Usenet = []string{"omicron", "usenetexpress", "abavia"}
+		c.Adapters.Usenet = usenet.Backbones
 	}
 	return c, nil
 }
