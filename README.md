@@ -43,7 +43,8 @@ hearsay serve
 No configuration is necessary. The daemon creates a keypair on the first run, publishes your observations, and discovers publishers on the DHT. It works behind CGNAT. To change defaults:
 
 ```yaml
-# config.yaml, then: hearsay serve --config config.yaml
+# Loaded from <user config dir>/hearsay/config.yaml if present,
+# e.g. ~/.config/hearsay/config.yaml. Or: hearsay serve --config <path>
 dir: /var/lib/hearsay
 listen: "127.0.0.1:8477"
 hearsay:

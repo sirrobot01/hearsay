@@ -35,6 +35,17 @@ type Follow struct {
 	Label  string `yaml:"label"`
 }
 
+// defaultConfigPath is where serve looks without --config, e.g.
+// ~/.config/hearsay/config.yaml on Linux. A missing file means
+// defaults: zero-config stays zero-config.
+func defaultConfigPath() string {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "hearsay", "config.yaml")
+}
+
 func loadConfig(path string) (Config, error) {
 	var c Config
 	c.Hearsay.Enabled = true

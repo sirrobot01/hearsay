@@ -25,12 +25,17 @@ func serveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the daemon: local store, network sync, HTTP query API",
-		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("config") {
+				if _, err := os.Stat(configPath); err != nil {
+					return err
+				}
+			}
 			return serve(configPath, listen)
 		},
 	}
-	cmd.Flags().StringVarP(&configPath, "config", "c", "", "path to config file (optional; defaults are fully functional)")
+	cmd.Flags().StringVarP(&configPath, "config", "c", defaultConfigPath(), "path to config file (missing file = defaults)")
 	cmd.Flags().StringVar(&listen, "listen", "", "HTTP listen address (overrides config)")
 	return cmd
 }
