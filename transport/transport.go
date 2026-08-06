@@ -123,6 +123,47 @@ func (n *Node) Feeds(ns string) []string {
 	return ids
 }
 
+// TorrentStat describes one generation blob this node serves or is
+// fetching, and how many peers it is exchanging data with right now.
+type TorrentStat struct {
+	InfoHash    string `json:"infohash"`
+	Size        int64  `json:"size"`
+	Completed   int64  `json:"completed"`
+	ActivePeers int    `json:"active_peers"`
+}
+
+// Stats is a point-in-time view of network participation.
+type Stats struct {
+	SwarmPort  int            `json:"swarm_port"`
+	GossipPort int            `json:"gossip_port"`
+	Torrents   []TorrentStat  `json:"torrents"`
+	Feeds      map[string]int `json:"feeds"`
+}
+
+func (n *Node) Stats() Stats {
+	s := Stats{SwarmPort: n.client.LocalPort(), Feeds: map[string]int{}}
+	if a, ok := n.gossip.Addr().(*net.TCPAddr); ok {
+		s.GossipPort = a.Port
+	}
+	for _, t := range n.client.Torrents() {
+		st := TorrentStat{
+			InfoHash:    t.InfoHash().HexString(),
+			ActivePeers: t.Stats().ActivePeers,
+		}
+		if t.Info() != nil {
+			st.Size = t.Length()
+			st.Completed = t.BytesCompleted()
+		}
+		s.Torrents = append(s.Torrents, st)
+	}
+	n.mu.Lock()
+	for ns, feeds := range n.known {
+		s.Feeds[ns] = len(feeds)
+	}
+	n.mu.Unlock()
+	return s
+}
+
 // Seed writes a generation blob into the swarm directory and serves
 // it as a single-file torrent.
 func (n *Node) Seed(blob []byte) (metainfo.Hash, error) {

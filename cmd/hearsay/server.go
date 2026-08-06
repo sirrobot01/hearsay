@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/sirrobot01/hearsay"
+	"github.com/sirrobot01/hearsay/transport"
 )
 
 type server struct {
-	h *hearsay.Hearsay
+	h    *hearsay.Hearsay
+	node *transport.Node
 }
 
 func (s *server) mux() *http.ServeMux {
@@ -162,10 +164,14 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		ns := d.Namespace()
 		namespaces = append(namespaces, nsStatus{Namespace: ns, Feeds: len(s.h.Feeds(ns))})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"identity":   "ed25519:" + hex.EncodeToString(s.h.Identity()),
 		"namespaces": namespaces,
-	})
+	}
+	if s.node != nil {
+		out["transport"] = s.node.Stats()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func toFloat(v any) (float64, bool) {

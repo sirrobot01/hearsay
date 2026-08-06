@@ -67,6 +67,7 @@ func serve(configPath, listen string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var node *transport.Node
 	if cfg.Hearsay.Enabled {
 		var interval time.Duration
 		if cfg.Hearsay.Interval != "" {
@@ -74,7 +75,7 @@ func serve(configPath, listen string) error {
 				return err
 			}
 		}
-		node, err := transport.Listen(filepath.Join(cfg.Dir, "swarm"), cfg.Hearsay.Port, cfg.Hearsay.GossipPort)
+		node, err = transport.Listen(filepath.Join(cfg.Dir, "swarm"), cfg.Hearsay.Port, cfg.Hearsay.GossipPort)
 		if err != nil {
 			return err
 		}
@@ -101,7 +102,7 @@ func serve(configPath, listen string) error {
 		log.Info("network participation disabled; local ground truth only")
 	}
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: (&server{h: h}).mux()}
+	srv := &http.Server{Addr: cfg.Listen, Handler: (&server{h: h, node: node}).mux()}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
