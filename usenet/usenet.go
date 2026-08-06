@@ -13,8 +13,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"net"
 	"strings"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/sirrobot01/hearsay"
 )
@@ -23,10 +26,63 @@ const (
 	Omicron       = "omicron"
 	UsenetExpress = "usenetexpress"
 	Abavia        = "abavia"
+	Giganews      = "giganews"
 )
 
 // Backbones lists the backbones shipped with v1.
-var Backbones = []string{Omicron, UsenetExpress, Abavia}
+var Backbones = []string{Omicron, UsenetExpress, Abavia, Giganews}
+
+// resellers maps well-known NNTP host domains to their backbone.
+// Part of the protocol: every implementation must ship the same table
+// so independently derived namespaces agree. Only stable,
+// high-confidence pairs belong here; explicit operator configuration
+// always wins over inference.
+var resellers = map[string]string{
+	// Omicron Media (Highwinds network)
+	"newshosting.com":  Omicron,
+	"usenetserver.com": Omicron,
+	"easynews.com":     Omicron,
+	"tweaknews.eu":     Omicron,
+
+	// UsenetExpress
+	"usenetexpress.com": UsenetExpress,
+	"newsdemon.com":     UsenetExpress,
+
+	// Abavia
+	"eweka.nl":       Abavia,
+	"pureusenet.nl":  Abavia,
+	"sunnyusenet.com": Abavia,
+
+	// Giganews
+	"giganews.com":  Giganews,
+	"supernews.com": Giganews,
+}
+
+// InferBackbone derives a backbone identifier from an NNTP host when
+// the operator did not configure one. Known reseller hosts map to
+// their backbone. Unknown hosts fall back to their registrable domain
+// with dots replaced by dashes: that silos observations per reseller
+// instead of aggregating them per backbone, but it never attributes
+// them to the wrong backbone.
+func InferBackbone(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "" {
+		return ""
+	}
+	for domain, backbone := range resellers {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return backbone
+		}
+	}
+	base, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return ""
+	}
+	return strings.ReplaceAll(base, ".", "-")
+}
 
 type Domain struct {
 	backbone string

@@ -25,6 +25,25 @@ func TestEncode(t *testing.T) {
 	}
 }
 
+func TestInferBackbone(t *testing.T) {
+	cases := map[string]string{
+		"news.newshosting.com":   Omicron,
+		"NEWS.EWEKA.NL":          Abavia,
+		"news.usenetexpress.com": UsenetExpress,
+		"news.giganews.com":      Giganews,
+		"news.supernews.com":     Giganews,
+		"news.newshosting.com:563": Omicron,
+		"news.blocknews.net":     "blocknews-net",
+		"reader.xsnews.nl":       "xsnews-nl",
+		"":                       "",
+	}
+	for host, want := range cases {
+		if got := InferBackbone(host); got != want {
+			t.Errorf("InferBackbone(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
 func TestVerifyAndDecay(t *testing.T) {
 	d := New(Abavia)
 	if tr := d.Verify("x", 0.93); !tr.Known || tr.Value != 0.93 {
