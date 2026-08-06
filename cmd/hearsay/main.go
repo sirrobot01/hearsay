@@ -17,7 +17,7 @@ func main() {
 		Version:      version,
 		SilenceUsage: true,
 	}
-	root.AddCommand(serveCmd(), torznabCmd())
+	root.AddCommand(serveCmd(), torznabCmd(), statusCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
