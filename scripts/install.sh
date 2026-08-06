@@ -51,7 +51,10 @@ Restart=on-failure
 WantedBy=multi-user.target
 EOF
     $SUDO systemctl daemon-reload
-    $SUDO systemctl enable --now hearsay
+    $SUDO systemctl enable hearsay
+    # restart, not "enable --now": an already-running service must pick
+    # up the new binary on upgrade
+    $SUDO systemctl restart hearsay
     say "service running; check it with: systemctl status hearsay"
 }
 
