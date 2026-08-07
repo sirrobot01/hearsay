@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/sirrobot01/hearsay"
@@ -56,28 +57,52 @@ func (s *Syncer) namespaces() map[string]hearsay.Domain {
 	return m
 }
 
+// pullCap bounds generation fetches in flight across all namespaces.
+// Namespaces themselves sync concurrently: a feed that is slow to
+// locate must not hold up every other feed behind it.
+const pullCap = 8
+
 func (s *Syncer) sync(ctx context.Context) {
 	self := hex.EncodeToString(s.Engine.Identity())
+	sem := make(chan struct{}, pullCap)
+	var wg sync.WaitGroup
 	for ns := range s.namespaces() {
 		if ctx.Err() != nil {
-			return
+			break
 		}
-		if s.Publish {
-			s.publish(ctx, ns, self)
-		}
-		// Feeds already retained on disk survive restarts and are
-		// re-advertised over gossip.
-		for _, feed := range s.Engine.Feeds(ns) {
-			s.Node.AddFeed(ns, feed)
-		}
-		s.Node.Discover(ctx, ns)
-		for _, feed := range s.Node.Feeds(ns) {
-			if feed == self {
-				continue
-			}
-			s.pull(ctx, ns, feed)
-		}
+		wg.Go(func() { s.syncNamespace(ctx, ns, self, sem) })
 	}
+	wg.Wait()
+}
+
+func (s *Syncer) syncNamespace(ctx context.Context, ns, self string, sem chan struct{}) {
+	if s.Publish {
+		s.publish(ctx, ns, self)
+	}
+	// Feeds already retained on disk survive restarts and are
+	// re-advertised over gossip.
+	for _, feed := range s.Engine.Feeds(ns) {
+		s.Node.AddFeed(ns, feed)
+	}
+	// Discovery runs even with no known feeds: it is the only way to
+	// learn the first publisher in a namespace.
+	s.Node.Discover(ctx, ns)
+	var wg sync.WaitGroup
+	for _, feed := range s.Node.Feeds(ns) {
+		if feed == self {
+			continue
+		}
+		wg.Go(func() {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			s.pull(ctx, ns, feed)
+		})
+	}
+	wg.Wait()
 }
 
 func (s *Syncer) publish(ctx context.Context, ns, self string) {
@@ -107,6 +132,16 @@ func (s *Syncer) publish(ctx context.Context, ns, self string) {
 	}
 }
 
+// fetchTimeout budgets one attempt at a generation blob. A publisher
+// behind CGNAT cannot be dialled: it finds leechers by watching the
+// DHT for the infohash and dialling out. Fetching therefore costs an
+// announce plus the publisher's next scrape, not a round trip, and a
+// budget shorter than that fails every first attempt on a fresh
+// pointer while the retry a cycle later succeeds. Abandoning the fetch
+// also withdraws the announce the publisher is waiting to see, so the
+// budget must cover several of its scrape cycles.
+const fetchTimeout = 15 * time.Minute
+
 func (s *Syncer) pull(ctx context.Context, ns, feed string) {
 	pub, err := hex.DecodeString(feed)
 	if err != nil || len(pub) != 32 {
@@ -126,7 +161,7 @@ func (s *Syncer) pull(ctx context.Context, ns, feed string) {
 		}
 		return
 	}
-	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	raw, err := s.Node.Fetch(fetchCtx, ptr.InfoHash)
 	cancel()
 	if err != nil {
