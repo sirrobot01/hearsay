@@ -15,14 +15,21 @@ type bloom struct {
 
 const bloomFPR = 0.01
 
-func newBloom(n int) *bloom {
+// bloomDims returns the hash count and bit-array length in bytes for
+// n keys at the fixed FPR.
+func bloomDims(n int) (uint32, int) {
 	if n < 1 {
 		n = 1
 	}
 	m := uint64(math.Ceil(-float64(n) * math.Log(bloomFPR) / (math.Ln2 * math.Ln2)))
 	m = (m + 7) &^ 7
 	k := max(uint32(math.Round(float64(m)/float64(n)*math.Ln2)), 1)
-	return &bloom{k: k, bits: make([]byte, m/8)}
+	return k, int(m / 8)
+}
+
+func newBloom(n int) *bloom {
+	k, nbytes := bloomDims(n)
+	return &bloom{k: k, bits: make([]byte, nbytes)}
 }
 
 func (b *bloom) add(key Key) {

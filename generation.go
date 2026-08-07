@@ -133,6 +133,9 @@ func ParseGeneration(raw []byte) (*Generation, error) {
 	i += copy(g.GenKey[:], raw[i:])
 	i += copy(g.KeyProof[:], raw[i:])
 	copy(g.Sig[:], raw[i:])
+	if g.Type == Bool && !validBoolPayload(g.Payload, g.Count) {
+		return nil, ErrInvalidGeneration
+	}
 	if !ed25519.Verify(g.Identity[:], g.rotationMsg(), g.KeyProof[:]) {
 		return nil, ErrInvalidGeneration
 	}

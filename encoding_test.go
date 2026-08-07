@@ -1,6 +1,7 @@
 package hearsay
 
 import (
+	"encoding/binary"
 	"math/rand/v2"
 	"testing"
 )
@@ -31,6 +32,41 @@ func TestBoolPayload(t *testing.T) {
 	}
 	if fp > 300 {
 		t.Fatalf("false positive rate too high: %d/10000", fp)
+	}
+}
+
+func TestValidBoolPayload(t *testing.T) {
+	r := rand.NewChaCha8([32]byte{3})
+	for _, n := range []int{1, 2, 3, 4, 5, 8, 13, 40, 1000} {
+		keys := make([]Key, n)
+		for i := range keys {
+			keys[i] = randKey(r)
+		}
+		if !validBoolPayload(encodeBoolPayload(keys), uint32(n)) {
+			t.Fatalf("honest payload rejected for n=%d", n)
+		}
+	}
+
+	honest := encodeBoolPayload([]Key{{1}, {2}, {3}})
+	if validBoolPayload(honest, 4) {
+		t.Fatal("wrong count accepted")
+	}
+	if validBoolPayload(honest[:len(honest)-1], 3) {
+		t.Fatal("truncated payload accepted")
+	}
+
+	hugeK := append([]byte(nil), honest...)
+	binary.BigEndian.PutUint32(hugeK, 1<<30)
+	if validBoolPayload(hugeK, 3) {
+		t.Fatal("forged hash count accepted")
+	}
+
+	saturated := append([]byte(nil), honest...)
+	for i := 4; i < len(saturated); i++ {
+		saturated[i] = 0xff
+	}
+	if validBoolPayload(saturated, 3) {
+		t.Fatal("saturated filter accepted")
 	}
 }
 

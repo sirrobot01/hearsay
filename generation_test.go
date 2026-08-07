@@ -2,6 +2,7 @@ package hearsay
 
 import (
 	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"testing"
 	"time"
@@ -30,6 +31,32 @@ func TestGenerationRoundTrip(t *testing.T) {
 	}
 	if _, ok := payloadLookup(Bool, got.Payload, Key{2}); !ok {
 		t.Fatal("payload lost")
+	}
+}
+
+func TestGenerationHostileBloom(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+
+	// Correct dimensions for the declared count, but every bit set:
+	// would match all subjects.
+	saturated := encodeBoolPayload([]Key{{1}, {2}, {3}})
+	for i := 4; i < len(saturated); i++ {
+		saturated[i] = 0xff
+	}
+	// Hash count far beyond what the count derives: CPU cost per
+	// lookup is proportional to it.
+	hugeK := encodeBoolPayload([]Key{{1}, {2}, {3}})
+	binary.BigEndian.PutUint32(hugeK, 1<<30)
+
+	for name, payload := range map[string][]byte{"saturated": saturated, "hugeK": hugeK} {
+		g, err := BuildGeneration(priv, "ns.test", Bool, 1, time.Now(), 3, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := g.MarshalBinary()
+		if _, err := ParseGeneration(raw); !errors.Is(err, ErrInvalidGeneration) {
+			t.Fatalf("%s payload accepted despite valid signatures", name)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"math/bits"
 	"slices"
 	"sort"
 )
@@ -37,6 +38,25 @@ func encodeScalarPayload(m map[Key]float64) []byte {
 		p = binary.BigEndian.AppendUint64(p, math.Float64bits(m[k]))
 	}
 	return p
+}
+
+// validBoolPayload reports whether a Bool payload could have been
+// produced by encodeBoolPayload for the declared key count. The bloom
+// dimensions are a pure function of the count, so any mismatch is
+// forged; that pins the hash count, whose lookup cost is otherwise
+// attacker-controlled. The fill check rejects saturated filters that
+// would match every subject: adding count keys sets at most k*count of
+// m bits (~73% of m), so an honest filter never exceeds 3/4.
+func validBoolPayload(p []byte, count uint32) bool {
+	k, nbytes := bloomDims(int(count))
+	if len(p) != 4+nbytes || binary.BigEndian.Uint32(p) != k {
+		return false
+	}
+	ones := 0
+	for _, b := range p[4:] {
+		ones += bits.OnesCount8(b)
+	}
+	return 4*ones <= 3*nbytes*8
 }
 
 // payloadLookup tests a payload for a key. For Bool payloads a hit
