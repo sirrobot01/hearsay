@@ -15,26 +15,39 @@ import (
 )
 
 func statusCmd() *cobra.Command {
-	var url string
+	var url, token string
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show daemon status: identity, sources, and network peers",
 		Args:  cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
-			return status(url)
+			token, err := clientToken(token)
+			if err != nil {
+				return err
+			}
+			return status(url, token)
 		},
 	}
 	cmd.Flags().StringVar(&url, "url", "http://127.0.0.1:8477", "daemon base URL")
+	cmd.Flags().StringVar(&token, "token", "", "API token (default: read from the daemon's data directory, or $HEARSAY_TOKEN)")
 	return cmd
 }
 
-func status(base string) error {
+func status(base, token string) error {
+	req, err := http.NewRequest(http.MethodGet, strings.TrimSuffix(base, "/")+"/v1/status", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	client := &http.Client{Timeout: 5 * time.Second}
-	res, err := client.Get(strings.TrimSuffix(base, "/") + "/v1/status")
+	res, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("cannot reach the daemon at %s — is it running? (%w)", base, err)
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("daemon rejected the API token; pass --token or set HEARSAY_TOKEN")
+	}
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("daemon returned %s", res.Status)
 	}

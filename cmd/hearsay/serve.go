@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 
@@ -25,7 +27,7 @@ func serveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the daemon: local store, network sync, HTTP query API",
-		Args: cobra.NoArgs,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if cmd.Flags().Changed("config") {
 				if _, err := os.Stat(configPath); err != nil {
@@ -62,7 +64,42 @@ func serve(configPath, listen string) error {
 		return err
 	}
 	defer h.Close()
-	log.Info("identity", "pubkey", "ed25519:"+hex.EncodeToString(h.Identity()))
+	self := hex.EncodeToString(h.Identity())
+	log.Info("identity", "pubkey", "ed25519:"+self)
+
+	token, err := loadToken(cfg.Dir)
+	if err != nil {
+		return err
+	}
+	log.Info("api token", "path", filepath.Join(cfg.Dir, tokenFile))
+
+	// A non-empty follow list is an allowlist, not a set of extra seeds:
+	// resolve it before the node starts so discovery never runs.
+	var follow []string
+	for _, f := range cfg.Hearsay.Follow {
+		key, err := f.Key()
+		if err != nil {
+			return err
+		}
+		follow = append(follow, key)
+	}
+	// Retained generations answer queries on their own, whether or not
+	// the network is running, so narrow the store before anything reads
+	// it: an allowlist has to drop what an earlier run discovered.
+	if len(follow) > 0 {
+		for _, d := range domains {
+			ns := d.Namespace()
+			for _, feed := range h.Feeds(ns) {
+				if feed == self || slices.Contains(follow, feed) {
+					continue
+				}
+				if err := h.Forget(ns, feed); err != nil {
+					return err
+				}
+				log.Info("dropped a retained feed outside the follow list", "ns", ns, "feed", feed[:8])
+			}
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -80,14 +117,15 @@ func serve(configPath, listen string) error {
 			return err
 		}
 		defer node.Close()
+		if len(follow) > 0 {
+			node.Allow(append(slices.Clone(follow), self)...)
+			log.Info("following an explicit publisher set; discovery and gossip cannot add to it", "publishers", len(follow))
+		}
 		for _, d := range domains {
-			node.Track(d.Namespace())
-			for _, f := range cfg.Hearsay.Follow {
-				key, err := f.Key()
-				if err != nil {
-					return err
-				}
-				node.AddFeed(d.Namespace(), key)
+			ns := d.Namespace()
+			node.Track(ns)
+			for _, key := range follow {
+				node.AddFeed(ns, key)
 			}
 		}
 		syncer := &transport.Syncer{
@@ -102,7 +140,8 @@ func serve(configPath, listen string) error {
 		log.Info("network participation disabled; local ground truth only")
 	}
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: (&server{h: h, node: node}).mux()}
+	api := &server{h: h, node: node, token: token, hosts: cfg.AllowedHosts}
+	srv := &http.Server{Addr: cfg.Listen, Handler: api.mux()}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -110,7 +149,7 @@ func serve(configPath, listen string) error {
 		srv.Shutdown(shutdownCtx)
 	}()
 	log.Info("listening", "addr", cfg.Listen)
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http: %w", err)
 	}
 	return nil

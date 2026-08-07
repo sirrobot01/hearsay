@@ -47,13 +47,14 @@ No configuration is necessary. The daemon creates a keypair on the first run, pu
 # e.g. ~/.config/hearsay/config.yaml. Or: hearsay serve --config <path>
 dir: /var/lib/hearsay
 listen: "127.0.0.1:8477"
+allowed_hosts: []      # extra Host header values; IPs and localhost always pass
 hearsay:
   enabled: true        # one flag to disable all network participation
   publish: true        # contribute observations
   interval: "30m"      # publish and fetch cycle
   port: 0              # swarm listen port; 0 = random
   gossip_port: 0       # discovery listen port; 0 = random
-  follow: []           # empty = discover publishers on the DHT
+  follow: []           # empty = discover on the DHT; non-empty = allowlist
 adapters:
   debrid: [realdebrid, alldebrid, torbox, premiumize]
   usenet: [omicron, usenetexpress, abavia]
@@ -68,6 +69,15 @@ POST /v1/observations  {"ns": "...", "observations": [{"subject": "...", "value"
 POST /v1/outcomes      {"ns": "...", "subject": "...", "outcome": false}
 GET  /v1/status
 ```
+
+Every endpoint needs the API token. The daemon writes the token to `<dir>/token` on the first run and prints the path at startup. Send it as a bearer token, and send JSON bodies as `application/json`:
+
+```
+curl -H "Authorization: Bearer $(cat ~/.config/hearsay/token)" \
+     127.0.0.1:8477/v1/status
+```
+
+The token is necessary even on loopback. A web page in your browser can post to `127.0.0.1` without it being your own request. The `hearsay` commands read the token file for you. Use `--token` or `HEARSAY_TOKEN` to reach a daemon on another machine.
 
 An answer is never a bare boolean. Set your own threshold:
 
@@ -109,7 +119,7 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 
 - Hearsay publishes only what you observed as cached or complete. Never what you searched for or wanted.
 - Bloom filters are testable, not enumerable. An adversary cannot list your subjects, but can test one they already hold.
-- Each generation is signed with a fresh key. Your identity signs only the rotation, which limits correlation over time.
+- Each generation carries a fresh signing key. Your long-term identity signs that key, and the identity is in every generation. The identity is also the key that others follow you by. All of your generations therefore stay linkable to each other and to you. The fresh key does not prevent this. It only limits what a leaked signing key can forge.
 - DHT topics are public: participation puts your IP on a per-namespace list. Set `enabled: false` to opt out of everything.
 
 ## Protocol notes
@@ -118,3 +128,4 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 - Generations are immutable and signed. Boolean namespaces encode as bloom filters; scalar as sorted key-value tables. Consumers keep the last 8 generations per feed; old claims expire by falling out of the window.
 - Pointers to the latest generation are BEP 44 mutable items at `SHA1(pubkey ++ namespace)`. To follow a publisher, you need only their public key. Payloads travel as torrents.
 - Discovery: one DHT topic per namespace, `SHA1("hearsay:v1:" + namespace)`, plus a small gossip handshake that exchanges publisher keys.
+- `follow` is an allowlist. If you list publishers, the daemon uses only those keys. It does not announce on the DHT topic, it ignores keys from gossip, and it discards feeds that an earlier run discovered.

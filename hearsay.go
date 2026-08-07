@@ -278,6 +278,9 @@ func (h *Hearsay) Ingest(raw []byte) (*Generation, error) {
 	if g.Type != d.ValueType() {
 		return nil, fmt.Errorf("hearsay: value type mismatch for %q", g.Namespace)
 	}
+	if g.BuiltAt.After(time.Now().Add(maxSkew)) {
+		return nil, ErrFutureGeneration
+	}
 	if g.FeedID() == h.self {
 		return nil, errors.New("hearsay: refusing to ingest own feed")
 	}
@@ -308,6 +311,14 @@ func (h *Hearsay) Feeds(ns string) []string {
 	}
 	slices.Sort(ids)
 	return ids
+}
+
+// Forget drops a feed's retained generations, from memory and from
+// disk. Narrowing to an explicit set of publishers uses it to discard
+// feeds an earlier run discovered: retained generations answer queries
+// whether or not the feed is still followed.
+func (h *Hearsay) Forget(ns, feed string) error {
+	return h.store.forget(ns, feed)
 }
 
 func (h *Hearsay) Close() error {

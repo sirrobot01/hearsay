@@ -12,10 +12,12 @@ import (
 // Generation is an immutable, signed snapshot of one publisher's
 // claims within one namespace at one point in time.
 //
-// Signing is at generation level with a fresh key per generation; feed
-// continuity is asserted by the long-term identity key signing each
-// rotation. This is enough to weight a source's recent accuracy
-// without binding one identity to a subject set over time.
+// Each generation carries a fresh signing key, and the long-term
+// identity key signs that key in a rotation proof. The identity is in
+// every generation, and it is the feed ID that consumers follow, so
+// every generation from one publisher stays linkable to the rest. The
+// fresh key bounds what a leaked signing key can forge. It does not
+// limit correlation.
 type Generation struct {
 	Namespace string
 	Type      ValueType
@@ -31,7 +33,16 @@ type Generation struct {
 
 const genMagic = "HSY1"
 
-var ErrInvalidGeneration = errors.New("hearsay: invalid generation")
+// maxSkew bounds how far ahead of local time a generation's BuiltAt may
+// be. BuiltAt is the publisher's own claim, and Decay grows without
+// bound for a negative age, so an unchecked future date would hold a
+// source at the freshness clamp forever while honest ones decay.
+const maxSkew = 5 * time.Minute
+
+var (
+	ErrInvalidGeneration = errors.New("hearsay: invalid generation")
+	ErrFutureGeneration  = errors.New("hearsay: generation built too far in the future")
+)
 
 // FeedID identifies the feed a generation belongs to: the hex-encoded
 // long-term identity public key.

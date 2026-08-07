@@ -3,6 +3,11 @@ package hearsay
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -246,5 +251,92 @@ func TestRetention(t *testing.T) {
 	rawStale, _ := stale.MarshalBinary()
 	if _, err := h.Ingest(rawStale); err == nil {
 		t.Fatal("stale seq accepted")
+	}
+}
+
+func TestIngestRejectsFutureGeneration(t *testing.T) {
+	h, err := New(t.TempDir(), testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	_, id, _ := ed25519.GenerateKey(nil)
+	d := testDomain{"ns.bool", Bool}
+	key, _ := d.Encode("abc")
+	payload := encodeBoolPayload([]Key{key})
+
+	for _, tc := range []struct {
+		name    string
+		builtAt time.Time
+		want    error
+	}{
+		{"within skew", time.Now().Add(maxSkew / 2), nil},
+		{"beyond skew", time.Now().Add(2 * maxSkew), ErrFutureGeneration},
+		{"far future", time.Now().Add(100 * 365 * 24 * time.Hour), ErrFutureGeneration},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, err := BuildGeneration(id, "ns.bool", Bool, 1, tc.builtAt, 1, payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := g.MarshalBinary()
+			if _, err := h.Ingest(raw); !errors.Is(err, tc.want) {
+				t.Fatalf("Ingest = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// A future BuiltAt would otherwise hold a source at the freshness clamp
+// while honest ones decay, so it must not reach the query path at all.
+func TestFutureGenerationCannotOutlastDecay(t *testing.T) {
+	h, err := New(t.TempDir(), testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	_, id, _ := ed25519.GenerateKey(nil)
+	d := testDomain{"ns.bool", Bool}
+	key, _ := d.Encode("abc")
+	g, _ := BuildGeneration(id, "ns.bool", Bool, 1, time.Now().Add(50*365*24*time.Hour), 1, encodeBoolPayload([]Key{key}))
+	raw, _ := g.MarshalBinary()
+	h.Ingest(raw)
+
+	a, err := h.Query("ns.bool", "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Sources != 0 || a.Confidence != 0 {
+		t.Fatalf("future generation reached the query path: %+v", a)
+	}
+}
+
+func TestForgetDropsFeed(t *testing.T) {
+	dir := t.TempDir()
+	h, err := New(dir, testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	_, id, _ := ed25519.GenerateKey(nil)
+	remoteGen(t, h, id, "ns.bool", 1, map[string]float64{"abc": 1}, Bool)
+	feed := hex.EncodeToString(id.Public().(ed25519.PublicKey))
+
+	if a, _ := h.Query("ns.bool", "abc"); a.Sources != 1 {
+		t.Fatalf("setup: sources = %d", a.Sources)
+	}
+	if err := h.Forget("ns.bool", feed); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := h.Query("ns.bool", "abc"); a.Sources != 0 {
+		t.Fatalf("forgotten feed still answers: %+v", a)
+	}
+	if got := h.Feeds("ns.bool"); len(got) != 0 {
+		t.Fatalf("feeds = %v", got)
+	}
+	// The generations must be gone from disk too, or the next open
+	// reloads them.
+	if _, err := os.Stat(filepath.Join(dir, "feeds", feed, "ns.bool")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("generations still on disk: %v", err)
 	}
 }

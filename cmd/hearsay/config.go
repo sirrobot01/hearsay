@@ -17,9 +17,15 @@ import (
 // Config is fully functional with every field absent: zero-config is
 // a hard requirement.
 type Config struct {
-	Dir     string `yaml:"dir"`
-	Listen  string `yaml:"listen"`
-	Hearsay struct {
+	Dir string `yaml:"dir"`
+	// Listen is the HTTP API address. Keep it on loopback unless the
+	// network in front of it is trusted.
+	Listen string `yaml:"listen"`
+	// AllowedHosts adds Host header values the API accepts, for a
+	// reverse proxy that forwards its own name. IP literals and
+	// localhost are always accepted.
+	AllowedHosts []string `yaml:"allowed_hosts"`
+	Hearsay      struct {
 		Enabled    bool     `yaml:"enabled"`
 		Publish    bool     `yaml:"publish"`
 		Interval   string   `yaml:"interval"`

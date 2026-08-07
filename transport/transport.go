@@ -39,6 +39,7 @@ type Node struct {
 
 	mu    sync.Mutex
 	known map[string]map[string]struct{}
+	allow map[string]struct{} // nil = accept any discovered key
 }
 
 // Listen starts the swarm client, its DHT servers, and the gossip
@@ -92,16 +93,35 @@ func (n *Node) Track(ns string) {
 	}
 }
 
+// Allow restricts the node to a fixed set of publisher keys. Discovery
+// and gossip can then contribute nothing: AddFeed rejects every other
+// key and Discover stops announcing. Without a call, any discovered key
+// is a candidate. Pass the node's own key too, or it cannot advertise
+// its own feed.
+func (n *Node) Allow(pubHex ...string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.allow = make(map[string]struct{}, len(pubHex))
+	for _, k := range pubHex {
+		n.allow[k] = struct{}{}
+	}
+}
+
 // AddFeed registers a publisher key for a namespace, from config or
 // from discovery. Keys are candidates only: their pointers and
 // generations still verify cryptographically, and their weight is
-// earned through outcomes.
+// earned through outcomes. An allowlist rejects everything outside it.
 func (n *Node) AddFeed(ns, pubHex string) bool {
 	if raw, err := hex.DecodeString(pubHex); err != nil || len(raw) != 32 {
 		return false
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.allow != nil {
+		if _, ok := n.allow[pubHex]; !ok {
+			return false
+		}
+	}
 	if n.known[ns] == nil {
 		n.known[ns] = map[string]struct{}{}
 	}
@@ -228,8 +248,15 @@ func (n *Node) Fetch(ctx context.Context, infohash string) ([]byte, error) {
 // Discover announces the gossip port on the namespace topic, walks
 // responding participants, and exchanges known publisher keys with a
 // bounded number of them. Junk announcers cost connection attempts
-// only.
+// only. An allowlist makes discovery a no-op: it could add nothing, and
+// announcing would publish this node's address for no gain.
 func (n *Node) Discover(ctx context.Context, ns string) {
+	n.mu.Lock()
+	restricted := n.allow != nil
+	n.mu.Unlock()
+	if restricted {
+		return
+	}
 	topic := Topic(ns)
 	port := n.gossip.Addr().(*net.TCPAddr).Port
 	seen := map[string]struct{}{}

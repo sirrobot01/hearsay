@@ -133,7 +133,7 @@ main() {
         install_service_darwin
     fi
     say "installed $("$INSTALL_DIR/hearsay" --version 2>/dev/null || echo "hearsay $version")"
-    say "query it: curl 127.0.0.1:8477/v1/status"
+    say "query it: hearsay status"
 }
 
 main "$@"

@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -87,4 +88,57 @@ func TestGossipExchange(t *testing.T) {
 	if n1.AddFeed("ns.x", "junk") {
 		t.Fatal("invalid key accepted")
 	}
+}
+
+// An allowlist must hold against the two paths that add feeds without
+// the operator's say-so: gossip from any peer that connects, and the
+// syncer re-registering whatever an earlier run left on disk.
+func TestAllowlistRejectsGossipedFeeds(t *testing.T) {
+	followed := hex.EncodeToString(make([]byte, 32))
+	other := make([]byte, 32)
+	other[0] = 1
+	injected := hex.EncodeToString(other)
+
+	n1 := &Node{known: map[string]map[string]struct{}{}}
+	n1.Track("ns.x")
+	n1.Allow(followed)
+	if !n1.AddFeed("ns.x", followed) {
+		t.Fatal("followed key rejected")
+	}
+	if n1.AddFeed("ns.x", injected) {
+		t.Fatal("key outside the allowlist accepted")
+	}
+
+	n2 := &Node{known: map[string]map[string]struct{}{}}
+	n2.Track("ns.x")
+	n2.AddFeed("ns.x", injected)
+
+	c1, c2 := net.Pipe()
+	deadline := time.Now().Add(5 * time.Second)
+	c1.SetDeadline(deadline)
+	c2.SetDeadline(deadline)
+	done := make(chan struct{})
+	go func() {
+		n2.talk(c2)
+		c2.Close()
+		close(done)
+	}()
+	n1.talk(c1)
+	c1.Close()
+	<-done
+
+	if got := n1.Feeds("ns.x"); len(got) != 1 || got[0] != followed {
+		t.Fatalf("gossip added a feed outside the allowlist: %v", got)
+	}
+}
+
+// Discovery announces this node's address on a public topic, and with
+// an allowlist it could not act on what it learns anyway.
+func TestAllowlistDisablesDiscovery(t *testing.T) {
+	n := &Node{known: map[string]map[string]struct{}{}}
+	n.Track("ns.x")
+	n.Allow(hex.EncodeToString(make([]byte, 32)))
+	// gossip is nil, so Discover panics on the announce path if the
+	// allowlist does not short-circuit it first.
+	n.Discover(context.Background(), "ns.x")
 }

@@ -1,9 +1,14 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"mime"
+	"net"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/sirrobot01/hearsay"
@@ -11,18 +16,64 @@ import (
 )
 
 type server struct {
-	h    *hearsay.Hearsay
-	node *transport.Node
+	h     *hearsay.Hearsay
+	node  *transport.Node
+	token string
+	hosts []string // extra Host header values to accept, from config
 }
 
-func (s *server) mux() *http.ServeMux {
+func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/claim", s.claim)
 	mux.HandleFunc("POST /v1/claims", s.claims)
 	mux.HandleFunc("POST /v1/observations", s.observations)
 	mux.HandleFunc("POST /v1/outcomes", s.outcomes)
 	mux.HandleFunc("GET /v1/status", s.status)
-	return mux
+	return s.guard(mux)
+}
+
+// guard runs the checks every endpoint needs before its handler does.
+// A page in the operator's browser can reach a loopback daemon: it can
+// rebind DNS to defeat the origin rule, and a text/plain body makes the
+// POST a simple request that skips the preflight. So the Host must name
+// this daemon, a body must be real JSON, and the caller must hold the
+// token.
+func (s *server) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.allowedHost(r.Host) {
+			http.Error(w, "unrecognised Host header", http.StatusMisdirectedRequest)
+			return
+		}
+		if r.ContentLength != 0 || r.Method == http.MethodPost {
+			if ct, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || ct != "application/json" {
+				http.Error(w, "want Content-Type: application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// allowedHost accepts an IP literal or localhost, which is what a
+// direct client sends, and rejects the attacker-controlled name a
+// rebound lookup carries. Reverse proxies pass their own name through,
+// so config lists those.
+func (s *server) allowedHost(host string) bool {
+	name, _, err := net.SplitHostPort(host)
+	if err != nil {
+		name = host
+	}
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "["), "]")
+	if name == "localhost" || net.ParseIP(name) != nil {
+		return true
+	}
+	return slices.Contains(s.hosts, name)
 }
 
 // answer is the wire form of a hint. Never a bare boolean: callers

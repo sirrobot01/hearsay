@@ -76,19 +76,28 @@ func (s *store) loadTruth() error {
 		if err != nil {
 			return err
 		}
+		// Records written before observe clamped its timestamps may sit
+		// in the future, so clamp on the way in as well and rewrite the
+		// log when any record moves.
+		now := time.Now()
+		clamped := false
 		m := map[Key]Observation{}
 		for i := 0; i+truthRecLen <= len(raw); i += truthRecLen {
 			var k Key
 			copy(k[:], raw[i:])
+			at := time.Unix(0, int64(binary.BigEndian.Uint64(raw[i+40:])))
+			if at.After(now) {
+				at, clamped = now, true
+			}
 			m[k] = Observation{
 				Value: math.Float64frombits(binary.BigEndian.Uint64(raw[i+32:])),
-				At:    time.Unix(0, int64(binary.BigEndian.Uint64(raw[i+40:]))),
+				At:    at,
 			}
 		}
 		if len(m) > 0 {
 			s.truth[ns] = m
 		}
-		if len(m)*truthRecLen < len(raw) {
+		if clamped || len(m)*truthRecLen < len(raw) {
 			compact := make([]byte, 0, len(m)*truthRecLen)
 			for k, o := range m {
 				compact = appendTruthRec(compact, k, o)
@@ -137,8 +146,11 @@ func (s *store) loadFeeds() error {
 				if err != nil {
 					continue
 				}
+				// Future-dated generations are dropped here too, so a
+				// store written before Ingest bounded BuiltAt heals.
 				g, err := ParseGeneration(raw)
-				if err != nil || g.FeedID() != fd.Name() || g.Namespace != nd.Name() {
+				if err != nil || g.FeedID() != fd.Name() || g.Namespace != nd.Name() ||
+					g.BuiltAt.After(time.Now().Add(maxSkew)) {
 					os.Remove(filepath.Join(dir, f.Name()))
 					continue
 				}
@@ -169,7 +181,14 @@ func genPath(dir string, seq uint64) string {
 	return filepath.Join(dir, fmt.Sprintf("%d.gen", seq))
 }
 
+// observe records ground truth. Writes are ordered by at, so a caller
+// timestamp is clamped to now: a future one would win against every
+// later observation and pin the value permanently, including against
+// the outcomes that are supposed to correct it.
 func (s *store) observe(ns string, key Key, value float64, at time.Time) error {
+	if now := time.Now(); at.After(now) {
+		at = now
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.truth[ns]
@@ -227,6 +246,16 @@ func (s *store) addGeneration(g *Generation) error {
 	}
 	byFeed[g.FeedID()] = gens
 	return nil
+}
+
+func (s *store) forget(ns, feed string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.feeds[ns][feed]; !ok {
+		return nil
+	}
+	delete(s.feeds[ns], feed)
+	return os.RemoveAll(filepath.Join(s.dir, "feeds", feed, ns))
 }
 
 func (s *store) close() error {

@@ -28,6 +28,10 @@ func torznabCmd() *cobra.Command {
 			"releases first. On any failure the upstream result passes through untouched.",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
+			var err error
+			if p.token, err = clientToken(p.token); err != nil {
+				return err
+			}
 			p.upstream = strings.TrimSuffix(p.upstream, "/")
 			p.hearsayd = strings.TrimSuffix(p.hearsayd, "/")
 			p.log.Info("proxying", "listen", listen, "upstream", p.upstream, "ns", p.ns)
@@ -37,6 +41,7 @@ func torznabCmd() *cobra.Command {
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8478", "listen address")
 	cmd.Flags().StringVar(&p.upstream, "upstream", "", "upstream Torznab base URL, e.g. http://prowlarr:9696")
 	cmd.Flags().StringVar(&p.hearsayd, "hearsayd", "http://127.0.0.1:8477", "hearsay daemon base URL")
+	cmd.Flags().StringVar(&p.token, "token", "", "daemon API token (default: read from the daemon's data directory, or $HEARSAY_TOKEN)")
 	cmd.Flags().StringVar(&p.ns, "ns", "debrid.realdebrid.cached", "namespace to query")
 	cmd.MarkFlagRequired("upstream")
 	return cmd
@@ -49,6 +54,7 @@ var searchTypes = map[string]bool{
 type proxy struct {
 	upstream string
 	hearsayd string
+	token    string
 	ns       string
 	client   *http.Client
 	log      *slog.Logger
@@ -93,7 +99,13 @@ func (p *proxy) lookup(subjects []string) (map[string]claim, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := p.client.Post(p.hearsayd+"/v1/claims", "application/json", bytes.NewReader(reqBody))
+	req, err := http.NewRequest(http.MethodPost, p.hearsayd+"/v1/claims", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	res, err := p.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
