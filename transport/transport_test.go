@@ -142,3 +142,34 @@ func TestAllowlistDisablesDiscovery(t *testing.T) {
 	// allowlist does not short-circuit it first.
 	n.Discover(context.Background(), "ns.x")
 }
+
+// TestPeerCountExcludesSelf checks the announced self key still reaches
+// gossip but is left out of the peer count, which otherwise overstates
+// every namespace by one.
+func TestPeerCountExcludesSelf(t *testing.T) {
+	self := hex.EncodeToString(make([]byte, 32))
+	other := make([]byte, 32)
+	other[0] = 1
+	peer := hex.EncodeToString(other)
+
+	n := &Node{known: map[string]map[string]struct{}{}}
+	n.Track("ns.x")
+	n.Track("ns.empty")
+	n.Announce("ns.x", self)
+	n.Announce("ns.empty", self)
+	n.AddFeed("ns.x", peer)
+
+	n.mu.Lock()
+	gotX, gotEmpty := n.peersLocked("ns.x"), n.peersLocked("ns.empty")
+	n.mu.Unlock()
+	if gotX != 1 {
+		t.Errorf("ns.x peers = %d, want 1", gotX)
+	}
+	if gotEmpty != 0 {
+		t.Errorf("ns.empty peers = %d, want 0", gotEmpty)
+	}
+	// Gossip must still advertise self, or peers never learn this feed.
+	if got := n.Feeds("ns.x"); len(got) != 2 {
+		t.Errorf("gossip feeds = %v, want self and peer", got)
+	}
+}

@@ -38,6 +38,7 @@ type Node struct {
 	gossip net.Listener
 
 	mu    sync.Mutex
+	self  string
 	known map[string]map[string]struct{}
 	allow map[string]struct{} // nil = accept any discovered key
 }
@@ -91,6 +92,16 @@ func (n *Node) Track(ns string) {
 	if n.known[ns] == nil {
 		n.known[ns] = map[string]struct{}{}
 	}
+}
+
+// Announce registers this node's own publisher key for a namespace so
+// gossip has something to spread, and records it as self so peer
+// counts can leave it out.
+func (n *Node) Announce(ns, self string) bool {
+	n.mu.Lock()
+	n.self = self
+	n.mu.Unlock()
+	return n.AddFeed(ns, self)
 }
 
 // Allow restricts the node to a fixed set of publisher keys. Discovery
@@ -177,11 +188,23 @@ func (n *Node) Stats() Stats {
 		s.Torrents = append(s.Torrents, st)
 	}
 	n.mu.Lock()
-	for ns, feeds := range n.known {
-		s.Feeds[ns] = len(feeds)
+	for ns := range n.known {
+		s.Feeds[ns] = n.peersLocked(ns)
 	}
 	n.mu.Unlock()
 	return s
+}
+
+// peersLocked counts the publisher keys known for a namespace without
+// this node's own. Announce registers self so gossip has something to
+// spread, but sync never pulls from it, so reporting it as a peer
+// overstates the network by one in every namespace. Caller holds n.mu.
+func (n *Node) peersLocked(ns string) int {
+	c := len(n.known[ns])
+	if _, ok := n.known[ns][n.self]; ok && n.self != "" {
+		c--
+	}
+	return c
 }
 
 // Seed writes a generation blob into the swarm directory and serves

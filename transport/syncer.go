@@ -36,7 +36,7 @@ func (s *Syncer) Run(ctx context.Context) {
 		// A publisher advertises its own feed, or gossip has nothing
 		// to spread.
 		if s.Publish {
-			s.Node.AddFeed(ns, self)
+			s.Node.Announce(ns, self)
 		}
 	}
 	for {
