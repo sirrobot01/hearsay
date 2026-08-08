@@ -30,8 +30,8 @@ const fixture = `<?xml version="1.0" encoding="UTF-8"?>
 
 func TestRewrite(t *testing.T) {
 	answers := map[string]claim{
-		"aaaa": {Subject: "aaaa", Value: false, Confidence: 0.1, Sources: 2, Coverage: 0.5},
-		"bbbb": {Subject: "bbbb", Value: true, Confidence: 0.92, Sources: 4, Coverage: 0.8},
+		"aaaa": {Subject: "aaaa", Confidence: 0.1, Sources: 2, Coverage: 0.5},
+		"bbbb": {Subject: "bbbb", Confidence: 0.92, Sources: 4, Coverage: 0.8},
 	}
 	out := string(rewrite([]byte(fixture), func(subjects []string) (map[string]claim, error) {
 		if len(subjects) != 2 {
@@ -71,9 +71,42 @@ func TestRewritePassThrough(t *testing.T) {
 	}
 	broken := []byte(`<rss><channel><item><torznab:attr name="infohash" value="aa" /></item>`)
 	got := rewrite(broken, func([]string) (map[string]claim, error) {
-		return map[string]claim{"aa": {Subject: "aa", Value: true, Confidence: 1, Sources: 1}}, nil
+		return map[string]claim{"aa": {Subject: "aa", Confidence: 1, Sources: 1}}, nil
 	})
 	if !strings.Contains(string(got), "hearsay_confidence") {
 		t.Fatal("valid prefix of truncated doc not annotated")
+	}
+}
+
+// TestRewritePromotesSingleSource pins the case the daemon's 0.5
+// collapse got wrong: two equally fresh publishers, one of which
+// claims the release, scores just under the threshold. B trails A
+// upstream, so promoting it is observable.
+func TestRewritePromotesSingleSource(t *testing.T) {
+	out := string(rewrite([]byte(fixture), func([]string) (map[string]claim, error) {
+		return map[string]claim{
+			"bbbb": {Subject: "bbbb", Confidence: 0.49, Sources: 1, Coverage: 1},
+		}, nil
+	}))
+	if !strings.Contains(out, `name="hearsay_cached" value="true"`) {
+		t.Error("single-source claim not marked cached")
+	}
+	bIdx := strings.Index(out, "Release.B")
+	aIdx := strings.Index(out, "Release.A")
+	if bIdx == -1 || aIdx == -1 || bIdx > aIdx {
+		t.Errorf("single-source claim not promoted: B=%d A=%d", bIdx, aIdx)
+	}
+}
+
+// TestRewriteMarksUnclaimed checks a covered namespace with no
+// claiming source still reports false rather than being promoted.
+func TestRewriteMarksUnclaimed(t *testing.T) {
+	out := string(rewrite([]byte(fixture), func([]string) (map[string]claim, error) {
+		return map[string]claim{
+			"aaaa": {Subject: "aaaa", Confidence: 0, Sources: 0, Coverage: 1},
+		}, nil
+	}))
+	if !strings.Contains(out, `name="hearsay_cached" value="false"`) {
+		t.Error("unclaimed subject not marked false")
 	}
 }

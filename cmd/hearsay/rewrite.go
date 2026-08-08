@@ -9,16 +9,23 @@ import (
 
 type claim struct {
 	Subject    string  `json:"subject"`
-	Value      any     `json:"value"`
 	Confidence float64 `json:"confidence"`
 	Sources    int     `json:"sources"`
 	AgeSeconds int64   `json:"age_seconds"`
 	Coverage   float64 `json:"coverage"`
 }
 
+// cached reports whether any source positively claims the subject.
+// Bool payloads are bloom filters, so a hit is evidence and a miss is
+// only absence of evidence, never a denial: one source claiming a
+// release is the strongest signal that exists for it. The daemon's
+// own value field collapses confidence at 0.5, which discards that
+// signal whenever a namespace holds more publishers than happen to
+// agree — against two equally fresh feeds a lone claiming source
+// scores 0.49 and the release sinks. Confidence orders what promotes,
+// so thin claims still rank below corroborated ones.
 func (c claim) cached() bool {
-	v, ok := c.Value.(bool)
-	return ok && v
+	return c.Sources > 0
 }
 
 type item struct {
