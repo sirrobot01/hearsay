@@ -2,10 +2,25 @@
 // backbone. Namespaces are keyed by backbone rather than reseller,
 // because completeness is a property of the backbone.
 //
-// Subjects are content identifiers: the lowercase hex sha256 of the
-// NZB file. The key is the sha256 of those raw hash bytes. Every
-// downloader learns completeness for every NZB they touch; that is the
-// observation.
+// Subjects are content identifiers: the lowercase hex sha256 over the
+// message-ids of every article in the post, sorted byte-wise ascending
+// and NUL-separated, each taken as it appears in the NZB without angle
+// brackets. Exclude files whose name ends in ".par2"; include every
+// other file, so no implementation has to reproduce another's idea of
+// which files are incidental. The key is the sha256 of those raw hash
+// bytes.
+//
+// Hashing the NZB file itself would be simpler, but it is not stable.
+// The same post re-indexed elsewhere differs in metadata, file order,
+// and whitespace, so operators using different indexers would never
+// derive the same subject and could never corroborate one another.
+// Message-ids are the articles, so they identify the post rather than
+// one indexer's description of it, and two separate posts of the same
+// content stay distinct — which is correct, because their availability
+// genuinely differs.
+//
+// Every downloader learns completeness for every NZB they touch; that
+// is the observation.
 package usenet
 
 import (
