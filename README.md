@@ -95,6 +95,8 @@ hearsay torznab --upstream http://prowlarr:9696
 
 Point your *arr at the proxy instead of the indexer. The proxy adds `hearsay_confidence` and `hearsay_cached` attributes to each release and moves claimed-cached releases to the top. On any failure, it returns the upstream result untouched.
 
+The proxy is also a library, `github.com/sirrobot01/hearsay/torznab`. An application that embeds the engine can serve the same proxy from its own process, answered by an in-process `Lookup` instead of the daemon.
+
 ## Embed the library
 
 ```go
@@ -117,7 +119,7 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 
 ## Privacy
 
-- Hearsay publishes only what you observed as cached or complete. Never what you searched for or wanted.
+- Hearsay publishes only what you observed, never what you searched for or wanted. Boolean domains publish positive observations only: a bloom filter cannot carry a denial. Scalar domains publish the observed value, failures included — an incomplete-download claim tells the network you handled that post. Disable `publish` to contribute nothing.
 - Bloom filters are testable, not enumerable. An adversary cannot list your subjects, but can test one they already hold.
 - Each generation carries a fresh signing key. Your long-term identity signs that key, and the identity is in every generation. The identity is also the key that others follow you by. All of your generations therefore stay linkable to each other and to you. The fresh key does not prevent this. It only limits what a leaked signing key can forge.
 - DHT topics are public: participation puts your IP on a per-namespace list. Set `enabled: false` to opt out of everything.
