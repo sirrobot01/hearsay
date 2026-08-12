@@ -1,7 +1,10 @@
-package main
+package torznab
 
 import (
 	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -29,11 +32,11 @@ const fixture = `<?xml version="1.0" encoding="UTF-8"?>
 </rss>`
 
 func TestRewrite(t *testing.T) {
-	answers := map[string]claim{
+	answers := map[string]Claim{
 		"aaaa": {Subject: "aaaa", Confidence: 0.1, Sources: 2, Coverage: 0.5},
 		"bbbb": {Subject: "bbbb", Confidence: 0.92, Sources: 4, Coverage: 0.8},
 	}
-	out := string(rewrite([]byte(fixture), func(subjects []string) (map[string]claim, error) {
+	out := string(Rewrite([]byte(fixture), func(subjects []string) (map[string]Claim, error) {
 		if len(subjects) != 2 {
 			t.Fatalf("subjects = %v", subjects)
 		}
@@ -62,16 +65,16 @@ func TestRewrite(t *testing.T) {
 
 func TestRewritePassThrough(t *testing.T) {
 	noItems := `<?xml version="1.0"?><rss><channel><title>x</title></channel></rss>`
-	if got := rewrite([]byte(noItems), nil); !bytes.Equal(got, []byte(noItems)) {
+	if got := Rewrite([]byte(noItems), nil); !bytes.Equal(got, []byte(noItems)) {
 		t.Fatal("empty result modified")
 	}
 	noHashes := `<rss><channel><item><title>y</title></item></channel></rss>`
-	if got := rewrite([]byte(noHashes), nil); !bytes.Equal(got, []byte(noHashes)) {
+	if got := Rewrite([]byte(noHashes), nil); !bytes.Equal(got, []byte(noHashes)) {
 		t.Fatal("hashless result modified")
 	}
 	broken := []byte(`<rss><channel><item><torznab:attr name="infohash" value="aa" /></item>`)
-	got := rewrite(broken, func([]string) (map[string]claim, error) {
-		return map[string]claim{"aa": {Subject: "aa", Confidence: 1, Sources: 1}}, nil
+	got := Rewrite(broken, func([]string) (map[string]Claim, error) {
+		return map[string]Claim{"aa": {Subject: "aa", Confidence: 1, Sources: 1}}, nil
 	})
 	if !strings.Contains(string(got), "hearsay_confidence") {
 		t.Fatal("valid prefix of truncated doc not annotated")
@@ -83,8 +86,8 @@ func TestRewritePassThrough(t *testing.T) {
 // claims the release, scores just under the threshold. B trails A
 // upstream, so promoting it is observable.
 func TestRewritePromotesSingleSource(t *testing.T) {
-	out := string(rewrite([]byte(fixture), func([]string) (map[string]claim, error) {
-		return map[string]claim{
+	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
+		return map[string]Claim{
 			"bbbb": {Subject: "bbbb", Confidence: 0.49, Sources: 1, Coverage: 1},
 		}, nil
 	}))
@@ -101,12 +104,81 @@ func TestRewritePromotesSingleSource(t *testing.T) {
 // TestRewriteMarksUnclaimed checks a covered namespace with no
 // claiming source still reports false rather than being promoted.
 func TestRewriteMarksUnclaimed(t *testing.T) {
-	out := string(rewrite([]byte(fixture), func([]string) (map[string]claim, error) {
-		return map[string]claim{
+	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
+		return map[string]Claim{
 			"aaaa": {Subject: "aaaa", Confidence: 0, Sources: 0, Coverage: 1},
 		}, nil
 	}))
 	if !strings.Contains(out, `name="hearsay_cached" value="false"`) {
 		t.Error("unclaimed subject not marked false")
+	}
+}
+
+func TestProxyRewritesSearch(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/1/api" || r.URL.Query().Get("apikey") != "k" {
+			t.Errorf("upstream got %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		w.Write([]byte(fixture))
+	}))
+	defer upstream.Close()
+
+	p := &Proxy{
+		Upstream: upstream.URL + "/",
+		Lookup: func([]string) (map[string]Claim, error) {
+			return map[string]Claim{
+				"bbbb": {Subject: "bbbb", Confidence: 0.9, Sources: 3, Coverage: 1},
+			}, nil
+		},
+	}
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/1/api?t=search&apikey=k", nil))
+
+	out := rec.Body.String()
+	bIdx := strings.Index(out, "Release.B")
+	aIdx := strings.Index(out, "Release.A")
+	if bIdx == -1 || aIdx == -1 || bIdx > aIdx {
+		t.Errorf("claimed release not promoted: B=%d A=%d", bIdx, aIdx)
+	}
+	if !strings.Contains(out, "hearsay_confidence") {
+		t.Error("attributes missing")
+	}
+}
+
+func TestProxyPassesThroughNonSearch(t *testing.T) {
+	caps := `<caps><searching/></caps>`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(caps))
+	}))
+	defer upstream.Close()
+
+	p := &Proxy{Upstream: upstream.URL, Lookup: func([]string) (map[string]Claim, error) {
+		t.Fatal("lookup called on non-search request")
+		return nil, nil
+	}}
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/1/api?t=caps", nil))
+	if rec.Body.String() != caps {
+		t.Errorf("caps response modified: %q", rec.Body.String())
+	}
+}
+
+func TestProxyPassesThroughUpstreamError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	p := &Proxy{Upstream: upstream.URL, Lookup: func([]string) (map[string]Claim, error) {
+		t.Fatal("lookup called on upstream error")
+		return nil, nil
+	}}
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/1/api?t=search", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 passthrough", rec.Code)
+	}
+	if body, _ := io.ReadAll(rec.Body); !strings.Contains(string(body), "boom") {
+		t.Error("error body not passed through")
 	}
 }
