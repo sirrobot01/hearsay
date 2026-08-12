@@ -22,12 +22,19 @@ import (
 // Claim is one subject's answer. The JSON tags match the daemon's
 // /v1/claims response, so a daemon-backed Lookup can decode into it
 // directly.
+//
+// Denied marks positive evidence of absence: sources claimed the
+// subject in a paired denial namespace (added and found not cached).
+// A denied claim's Confidence and Sources describe the denial, and
+// Rewrite sinks it below every unclaimed release. Daemon answers
+// never set it; an engine-backed Lookup may, by pairing namespaces.
 type Claim struct {
 	Subject    string  `json:"subject"`
 	Confidence float64 `json:"confidence"`
 	Sources    int     `json:"sources"`
 	AgeSeconds int64   `json:"age_seconds"`
 	Coverage   float64 `json:"coverage"`
+	Denied     bool    `json:"denied,omitempty"`
 }
 
 // Cached reports whether any source positively claims the subject.
@@ -40,7 +47,7 @@ type Claim struct {
 // scores 0.49 and the release sinks. Confidence orders what promotes,
 // so thin claims still rank below corroborated ones.
 func (c Claim) Cached() bool {
-	return c.Sources > 0
+	return c.Sources > 0 && !c.Denied
 }
 
 // Lookup answers a batch of infohash subjects. Missing subjects mean
@@ -206,8 +213,17 @@ func Rewrite(body []byte, lookup Lookup) []byte {
 
 	first, last := items[0].start, items[len(items)-1].end
 	rank := func(it item) float64 {
-		if a, ok := answers[it.infohash]; ok && a.Cached() {
+		a, ok := answers[it.infohash]
+		if !ok {
+			return -1
+		}
+		if a.Cached() {
 			return a.Confidence
+		}
+		// A denial sinks below every unclaimed release; the more
+		// confident the denial, the lower.
+		if a.Denied {
+			return -2 - a.Confidence
 		}
 		return -1
 	}

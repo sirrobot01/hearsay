@@ -101,6 +101,26 @@ func TestRewritePromotesSingleSource(t *testing.T) {
 	}
 }
 
+// TestRewriteDemotesDenied checks that a release with positive
+// evidence of absence sinks below unclaimed releases, which keep
+// their upstream order.
+func TestRewriteDemotesDenied(t *testing.T) {
+	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
+		return map[string]Claim{
+			"aaaa": {Subject: "aaaa", Confidence: 0.8, Sources: 2, Coverage: 1, Denied: true},
+		}, nil
+	}))
+	aIdx := strings.Index(out, "Release.A")
+	bIdx := strings.Index(out, "Release.B")
+	cIdx := strings.Index(out, "Release.C")
+	if aIdx == -1 || bIdx == -1 || cIdx == -1 || aIdx < bIdx || aIdx < cIdx {
+		t.Errorf("denied release not demoted: A=%d B=%d C=%d", aIdx, bIdx, cIdx)
+	}
+	if !strings.Contains(out, `name="hearsay_cached" value="false"`) {
+		t.Error("denied release not marked uncached")
+	}
+}
+
 // TestRewriteMarksUnclaimed checks a covered namespace with no
 // claiming source still reports false rather than being promoted.
 func TestRewriteMarksUnclaimed(t *testing.T) {

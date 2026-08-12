@@ -54,7 +54,7 @@ func serve(configPath, listen string) error {
 
 	var domains []hearsay.Domain
 	for _, p := range cfg.Adapters.Debrid {
-		domains = append(domains, debrid.New(p))
+		domains = append(domains, debrid.New(p), debrid.NewUncached(p))
 	}
 	for _, b := range cfg.Adapters.Usenet {
 		domains = append(domains, usenet.New(b))

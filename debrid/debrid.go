@@ -42,6 +42,10 @@ func (d Domain) Namespace() string {
 
 // Encode accepts a hex infohash string (v1 or v2) or raw [20]byte.
 func (d Domain) Encode(subject any) (hearsay.Key, error) {
+	return encode(subject)
+}
+
+func encode(subject any) (hearsay.Key, error) {
 	switch s := subject.(type) {
 	case string:
 		raw, err := hex.DecodeString(strings.ToLower(strings.TrimSpace(s)))
@@ -73,6 +77,53 @@ func (d Domain) Verify(subject any, outcome any) hearsay.Truth {
 		v := 0.0
 		if instant {
 			v = 1
+		}
+		return hearsay.Truth{Known: true, Value: v}
+	}
+	return hearsay.Truth{}
+}
+
+// UncachedDomain is the paired denial namespace. Bloom payloads carry
+// positive claims only, so a denial travels as a positive claim in a
+// namespace whose membership means "added and found not cached". A
+// subject claimed here was wanted by the publisher — the same
+// disclosure a usenet incompleteness claim makes — and remains
+// bloom-protected: testable, not enumerable.
+type UncachedDomain struct {
+	provider string
+}
+
+func NewUncached(provider string) UncachedDomain {
+	return UncachedDomain{provider: provider}
+}
+
+func (d UncachedDomain) Namespace() string {
+	return "debrid." + d.provider + ".uncached"
+}
+
+// Encode accepts a hex infohash string (v1 or v2) or raw [20]byte.
+func (d UncachedDomain) Encode(subject any) (hearsay.Key, error) {
+	return encode(subject)
+}
+
+func (d UncachedDomain) ValueType() hearsay.ValueType {
+	return hearsay.Bool
+}
+
+// Decay halves confidence every 6 hours, four times as fast as a
+// cached claim: any operator's uncached download can flip the state
+// to cached at any moment, so the stale denial is the dangerous kind.
+func (d UncachedDomain) Decay(age time.Duration) float64 {
+	return math.Exp2(-age.Hours() / 6)
+}
+
+// Verify interprets the result of actually adding the subject: an
+// instant add proves the denial wrong. Anything else reveals nothing.
+func (d UncachedDomain) Verify(subject any, outcome any) hearsay.Truth {
+	if instant, ok := outcome.(bool); ok {
+		v := 1.0
+		if instant {
+			v = 0
 		}
 		return hearsay.Truth{Known: true, Value: v}
 	}

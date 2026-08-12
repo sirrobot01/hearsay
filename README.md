@@ -119,7 +119,7 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 
 ## Privacy
 
-- Hearsay publishes only what you observed, never what you searched for or wanted. Boolean domains publish positive observations only: a bloom filter cannot carry a denial. Scalar domains publish the observed value, failures included — an incomplete-download claim tells the network you handled that post. Disable `publish` to contribute nothing.
+- Hearsay publishes only what you observed through real work, never what you searched for. A failure is an observation too: an incomplete usenet download, or a torrent add that was not served from cache, publishes a claim — and that claim tells the network you attempted the subject. Disable `publish` to contribute nothing.
 - Bloom filters are testable, not enumerable. An adversary cannot list your subjects, but can test one they already hold.
 - Each generation carries a fresh signing key. Your long-term identity signs that key, and the identity is in every generation. The identity is also the key that others follow you by. All of your generations therefore stay linkable to each other and to you. The fresh key does not prevent this. It only limits what a leaked signing key can forge.
 - DHT topics are public: participation puts your IP on a per-namespace list. Set `enabled: false` to opt out of everything.
@@ -127,6 +127,7 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 ## Protocol notes
 
 - A claim is `(namespace, subject, value, observed_at)` — a claim, not a fact.
+- Bloom payloads carry positive claims only, so a debrid denial travels as a positive claim in the paired namespace `debrid.<vendor>.uncached`: membership means "added and found not cached". Denials decay with a 6 hour half-life — anyone's uncached download can flip the state — where cached claims get 24 hours.
 - Generations are immutable and signed. Boolean namespaces encode as bloom filters; scalar as sorted key-value tables. Consumers keep the last 8 generations per feed; old claims expire by falling out of the window.
 - Pointers to the latest generation are BEP 44 mutable items at `SHA1(pubkey ++ namespace)`. To follow a publisher, you need only their public key. Payloads travel as torrents.
 - Discovery: one DHT topic per namespace, `SHA1("hearsay:v1:" + namespace)`, plus a small gossip handshake that exchanges publisher keys.
