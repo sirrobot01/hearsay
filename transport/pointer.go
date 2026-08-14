@@ -11,8 +11,21 @@ import (
 	"github.com/anacrolix/dht/v2/bep44"
 	"github.com/anacrolix/dht/v2/exts/getput"
 	"github.com/anacrolix/dht/v2/krpc"
+	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent/bencode"
 )
+
+// quietDHT silences the per-node chatter of a DHT traversal. A put
+// fans out to the closest nodes and logs every one that does not
+// answer at warning level; a get logs every node that answers wrong.
+// Both are routine — the operation succeeds on the nodes that do
+// answer — but the target of a pointer is SHA1(pubkey ++ namespace)
+// and never changes, so the same unresponsive neighbour is re-selected
+// and re-logged on every republish, forever. The caller reports the
+// outcome that matters: whether the whole operation failed.
+func quietDHT(ctx context.Context) context.Context {
+	return alog.ContextWithLogger(ctx, alog.ContextLogger(ctx).WithFilterLevel(alog.Error))
+}
 
 // Pointer is the BEP 44 mutable item a publisher maintains per
 // namespace: where to fetch the latest generation. Signing and
@@ -47,6 +60,7 @@ func (n *Node) PutPointer(ctx context.Context, id ed25519.PrivateKey, ns string,
 	copy(k[:], pub)
 	salt := []byte(ns)
 	target := pointerTarget(pub, ns)
+	ctx = quietDHT(ctx)
 	errs := errors.New("transport: no dht servers")
 	for _, srv := range n.dhts {
 		_, err := getput.Put(ctx, krpc.ID(target), srv, salt, func(seq int64) bep44.Put {
@@ -68,6 +82,7 @@ func (n *Node) PutPointer(ctx context.Context, id ed25519.PrivateKey, ns string,
 func (n *Node) GetPointer(ctx context.Context, pub ed25519.PublicKey, ns string) (Pointer, error) {
 	salt := []byte(ns)
 	target := pointerTarget(pub, ns)
+	ctx = quietDHT(ctx)
 	errs := errors.New("transport: no dht servers")
 	for _, srv := range n.dhts {
 		res, _, err := getput.Get(ctx, target, srv, nil, salt)
