@@ -13,7 +13,7 @@ type bloom struct {
 	bits []byte
 }
 
-const bloomFPR = 0.01
+const bloomFPR = 0.0001
 
 // bloomDims returns the hash count and bit-array length in bytes for
 // n keys at the fixed FPR.

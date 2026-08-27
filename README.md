@@ -9,7 +9,7 @@ Hearsay is a hint layer, not an authority. An answer tells you what other operat
 1. Your tools do normal work and learn facts. Example: an add to a debrid service shows if a torrent is cached.
 2. Hearsay records these facts as local ground truth.
 3. Hearsay publishes signed snapshots of your truth, called generations. Other operators fetch yours. You fetch theirs.
-4. A query returns a value, a confidence, and an age. Local truth always wins.
+4. A query returns whether evidence exists, its value, support, weight, and age. Fresh local truth wins.
 5. You act on a hint. The outcome reveals the truth. Hearsay adjusts each source's weight from this feedback.
 
 A wrong source loses weight automatically. There is no voting, no global reputation, and no moderation.
@@ -66,6 +66,7 @@ adapters:
 ```
 GET  /v1/claim?ns=debrid.realdebrid.cached&subject=<infohash>
 POST /v1/claims        {"ns": "...", "subjects": ["...", "..."]}   # batch; the primary path
+POST /v1/evidence      {"positive_ns": "...cached", "negative_ns": "...uncached", "subjects": ["..."]}
 POST /v1/observations  {"ns": "...", "observations": [{"subject": "...", "value": true}]}
 POST /v1/outcomes      {"ns": "...", "subject": "...", "outcome": false}
 GET  /v1/status
@@ -80,11 +81,13 @@ curl -H "Authorization: Bearer $(cat ~/.config/hearsay/token)" \
 
 The token is necessary even on loopback. A web page in your browser can post to `127.0.0.1` without it being your own request. The `hearsay` commands read the token file for you. Use `--token` or `HEARSAY_TOKEN` to reach a daemon on another machine.
 
-An answer is never a bare boolean. Set your own threshold:
+An answer distinguishes unknown from false. `support` is the share of active source weight backing the value; `evidence_weight` is the absolute backing mass:
 
 ```json
-{"value": true, "confidence": 0.92, "sources": 4, "age_seconds": 21600, "coverage": 0.81}
+{"known": true, "value": true, "support": 0.92, "evidence_weight": 1.74, "sources": 4, "age_seconds": 21600, "coverage": 0.81}
 ```
+
+`/v1/evidence` combines complementary Boolean namespaces into `positive`, `negative`, or `unknown` without collapsing a miss into a denial.
 
 Push observations from your own work. Report outcomes after you act on a hint: this corrects the source weights.
 
@@ -92,10 +95,10 @@ Push observations from your own work. Report outcomes after you act on a hint: t
 
 ```
 hearsay torznab --upstream http://prowlarr:9696 \
-  --min-confidence 0.5 --min-sources 1 --max-age 24h
+  --min-support 0.5 --min-sources 1 --max-age 24h
 ```
 
-Point your *arr at the proxy instead of the indexer. The proxy adds `hearsay_confidence` and `hearsay_cached` attributes to each release and reorders evidence that passes the configured policy. Local observations always qualify. On any failure, it returns the upstream result untouched.
+Point your *arr at the proxy instead of the indexer. The proxy adds `hearsay_state`, `hearsay_support`, `hearsay_evidence_weight`, and—when known—`hearsay_cached` attributes. It reorders evidence that passes the configured policy. Fresh local observations always qualify. On any failure, it returns the upstream result untouched.
 
 The proxy is also a library, `github.com/sirrobot01/hearsay/torznab`. An application that embeds the engine can serve the same proxy from its own process, answered by an in-process `Lookup` instead of the daemon.
 
@@ -130,7 +133,8 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 
 - A claim is `(namespace, subject, value, observed_at)` — a claim, not a fact.
 - Bloom payloads carry positive claims only, so a debrid denial travels as a positive claim in the paired namespace `debrid.<vendor>.uncached`: membership means "added and found not cached". Denials decay with a 6 hour half-life — anyone's uncached download can flip the state — where cached claims get 24 hours.
-- Generations are immutable and signed. Boolean namespaces encode as bloom filters; scalar as sorted key-value tables. Consumers keep the last 8 generations per feed; old claims expire by falling out of the window.
-- Pointers to the latest generation are BEP 44 mutable items at `SHA1(pubkey ++ namespace)`. To follow a publisher, you need only their public key. Payloads travel as torrents.
-- Discovery: one DHT topic per namespace, `SHA1("hearsay:v1:" + namespace)`, plus a small gossip handshake that exchanges publisher keys.
+- `HSY2` generations are immutable and signed. Boolean namespaces use time-bucketed Bloom filters; scalar records carry their observation time. Domain freshness policies expire local and remote evidence without refreshing old claims when a generation is rebuilt.
+- Consumers keep the last 8 generations per feed for delivery resilience. Claim age comes from the payload, not the generation timestamp.
+- Pointers to the latest generation are BEP 44 mutable items under a versioned identity-and-namespace key. To follow a publisher, you need only their public key. Payloads travel as torrents.
+- Discovery uses one v2 DHT topic per namespace, `SHA1("hearsay:v2:" + namespace)`, plus a versioned gossip handshake that exchanges publisher keys.
 - `follow` is an allowlist. If you list publishers, the daemon uses only those keys. It does not announce on the DHT topic, it ignores keys from gossip, and it discards feeds that an earlier run discovered.

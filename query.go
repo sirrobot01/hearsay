@@ -5,104 +5,110 @@ import (
 	"time"
 )
 
-// Answer is never a bare boolean: callers set their own thresholds.
-// For Bool domains Value is 0 or 1; for Scalar domains it is the
-// weighted mean of source claims. Confidence is the decayed,
-// reputation-weighted share of covering sources that back the value.
-// Coverage is the share of known feeds that publish this namespace.
-// Local reports authoritative ground truth, not a hint.
+// Answer separates whether evidence exists from its value. Support is
+// corroborating source weight, while EvidenceWeight is its absolute mass.
 type Answer struct {
-	Value      float64
-	Confidence float64
-	Sources    int
-	Age        time.Duration
-	Coverage   float64
-	Local      bool
+	Known          bool
+	Value          float64
+	Support        float64
+	EvidenceWeight float64
+	Sources        int
+	Age            time.Duration
+	Coverage       float64
+	Local          bool
 }
 
-// Query answers from local ground truth if present, otherwise from
-// retained generations of followed feeds, weighted by per-source
-// reputation and domain decay.
 func (h *Hearsay) Query(ns string, subject any) (Answer, error) {
-	d, ok := h.domains[ns]
+	domain, ok := h.domains[ns]
 	if !ok {
 		return Answer{}, fmt.Errorf("hearsay: unknown namespace %q", ns)
 	}
-	key, err := d.Encode(subject)
+	key, err := domain.Encode(subject)
 	if err != nil {
 		return Answer{}, err
 	}
 	now := time.Now()
+	policy := domain.Freshness()
 
 	h.store.mu.RLock()
 	defer h.store.mu.RUnlock()
 
-	if o, ok := h.store.truth[ns][key]; ok {
-		return Answer{
-			Value:      o.Value,
-			Confidence: 1,
-			Sources:    1,
-			Age:        now.Sub(o.At),
-			Coverage:   1,
-			Local:      true,
-		}, nil
+	if observation, ok := h.store.truth[ns][key]; ok {
+		age := max(now.Sub(observation.At), 0)
+		if age <= policy.MaxAge {
+			return Answer{
+				Known:          true,
+				Value:          observation.Value,
+				Support:        1,
+				EvidenceWeight: evidenceWeight(domain, age),
+				Sources:        1,
+				Age:            age,
+				Coverage:       1,
+				Local:          true,
+			}, nil
+		}
 	}
 
 	var score, total, valueSum float64
 	var covering, hits int
 	minAge := time.Duration(-1)
-	for feed, gens := range h.store.feeds[ns] {
+	for feed, generations := range h.store.feeds[ns] {
 		if feed == h.self {
 			continue
 		}
-		covering++
-		w := h.rep.weight(feed)
-		newest := gens[len(gens)-1]
-		total += w * min(max(d.Decay(now.Sub(newest.BuiltAt)), 0), 1)
-		for i := len(gens) - 1; i >= 0; i-- {
-			v, ok := payloadLookup(gens[i].Type, gens[i].Payload, key)
-			if !ok {
-				continue
-			}
-			age := now.Sub(gens[i].BuiltAt)
-			dw := w * min(max(d.Decay(age), 0), 1)
-			score += dw
-			valueSum += dw * v
-			hits++
-			if minAge < 0 || age < minAge {
-				minAge = age
-			}
-			break
+		weight := h.rep.weight(feed)
+		newestAge := max(now.Sub(generations[len(generations)-1].BuiltAt), 0)
+		if newestAge <= policy.MaxAge {
+			covering++
+			total += weight * evidenceWeight(domain, newestAge)
+		}
+		newest := generations[len(generations)-1]
+		value, observedAt, ok := payloadLookup(newest.Type, newest.Payload, key)
+		if !ok {
+			continue
+		}
+		age := max(now.Sub(observedAt), 0)
+		if age > policy.MaxAge {
+			continue
+		}
+		weighted := weight * evidenceWeight(domain, age)
+		score += weighted
+		valueSum += weighted * value
+		hits++
+		if minAge < 0 || age < minAge {
+			minAge = age
 		}
 	}
 
-	known := map[string]struct{}{}
+	knownFeeds := map[string]struct{}{}
 	for _, byFeed := range h.store.feeds {
 		for id := range byFeed {
 			if id != h.self {
-				known[id] = struct{}{}
+				knownFeeds[id] = struct{}{}
 			}
 		}
 	}
 
-	a := Answer{Sources: hits}
-	if len(known) > 0 {
-		a.Coverage = float64(covering) / float64(len(known))
+	answer := Answer{Known: hits > 0, Sources: hits, EvidenceWeight: score}
+	if len(knownFeeds) > 0 {
+		answer.Coverage = float64(covering) / float64(len(knownFeeds))
 	}
 	if total > 0 {
-		a.Confidence = score / total
+		answer.Support = min(score/total, 1)
 	}
 	if minAge >= 0 {
-		a.Age = minAge
+		answer.Age = minAge
 	}
 	if score > 0 {
-		if d.ValueType() == Bool {
-			if a.Confidence >= 0.5 {
-				a.Value = 1
-			}
+		if domain.ValueType() == Bool {
+			answer.Value = 1
 		} else {
-			a.Value = valueSum / score
+			answer.Value = valueSum / score
 		}
 	}
-	return a, nil
+	return answer, nil
+}
+
+func evidenceWeight(domain Domain, age time.Duration) float64 {
+	return min(max(domain.Decay(age), 0), 1)
 }

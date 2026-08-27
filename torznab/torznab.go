@@ -19,21 +19,22 @@ import (
 	"time"
 )
 
-// Claim is one subject's answer. The JSON tags match the daemon's
-// /v1/claims response, so a daemon-backed Lookup can decode into it
-// directly.
+// Claim is one subject's resolved evidence. Its JSON tags match a side
+// of the daemon's paired evidence response.
 //
 // Denied marks positive evidence of absence from a paired namespace.
 // A local false Value is equivalent evidence from the daemon.
 type Claim struct {
-	Subject    string  `json:"subject"`
-	Value      *bool   `json:"value,omitempty"`
-	Confidence float64 `json:"confidence"`
-	Sources    int     `json:"sources"`
-	AgeSeconds int64   `json:"age_seconds"`
-	Coverage   float64 `json:"coverage"`
-	Local      bool    `json:"local,omitzero"`
-	Denied     bool    `json:"denied,omitzero"`
+	Subject        string  `json:"subject"`
+	Known          bool    `json:"known"`
+	Value          *bool   `json:"value,omitempty"`
+	Support        float64 `json:"support"`
+	EvidenceWeight float64 `json:"evidence_weight"`
+	Sources        int     `json:"sources"`
+	AgeSeconds     int64   `json:"age_seconds"`
+	Coverage       float64 `json:"coverage"`
+	Local          bool    `json:"local,omitzero"`
+	Denied         bool    `json:"denied,omitzero"`
 }
 
 // Cached reports positive evidence without treating a Bloom miss as a denial.
@@ -41,7 +42,7 @@ func (c Claim) Cached() bool {
 	if c.Denied {
 		return false
 	}
-	if c.Local && c.Value != nil {
+	if c.Known && c.Value != nil {
 		return *c.Value
 	}
 	return c.Sources > 0 && !c.Denied
@@ -49,42 +50,55 @@ func (c Claim) Cached() bool {
 
 // Uncached reports explicit negative evidence, including local truth.
 func (c Claim) Uncached() bool {
-	return c.Denied || c.Local && c.Value != nil && !*c.Value
+	return c.Denied || c.Known && c.Value != nil && !*c.Value
+}
+
+// State returns cached, uncached, or unknown.
+func (c Claim) State() string {
+	switch {
+	case c.Cached():
+		return "cached"
+	case c.Uncached():
+		return "uncached"
+	default:
+		return "unknown"
+	}
 }
 
 // RankPolicy controls which evidence may alter upstream order.
 type RankPolicy struct {
-	MinConfidence float64
-	MinSources    int
-	MaxAge        time.Duration
+	MinSupport float64
+	MinSources int
+	MaxAge     time.Duration
 }
 
 // DefaultRankPolicy accepts current evidence with majority support.
 func DefaultRankPolicy() RankPolicy {
 	return RankPolicy{
-		MinConfidence: 0.5,
-		MinSources:    1,
-		MaxAge:        24 * time.Hour,
+		MinSupport: 0.5,
+		MinSources: 1,
+		MaxAge:     24 * time.Hour,
 	}
 }
 
 // Accepts reports whether evidence is strong and recent enough to reorder.
 func (p RankPolicy) Accepts(c Claim) bool {
-	if c.Local && c.Value != nil {
+	if c.Local && c.Known && c.Value != nil {
 		return true
 	}
 	defaults := DefaultRankPolicy()
-	if p.MinConfidence == 0 {
-		p.MinConfidence = defaults.MinConfidence
-	}
-	if p.MinSources == 0 {
-		p.MinSources = defaults.MinSources
-	}
-	if p.MaxAge == 0 {
-		p.MaxAge = defaults.MaxAge
+	if p == (RankPolicy{}) {
+		p = defaults
+	} else {
+		if p.MinSources == 0 {
+			p.MinSources = defaults.MinSources
+		}
+		if p.MaxAge == 0 {
+			p.MaxAge = defaults.MaxAge
+		}
 	}
 	return c.Sources >= p.MinSources &&
-		c.Confidence >= p.MinConfidence &&
+		c.Support >= p.MinSupport &&
 		(p.MaxAge < 0 || time.Duration(c.AgeSeconds)*time.Second <= p.MaxAge)
 }
 
@@ -260,10 +274,10 @@ func RewriteWithPolicy(body []byte, lookup Lookup, policy RankPolicy) []byte {
 			return -1
 		}
 		if a.Cached() {
-			return a.Confidence
+			return a.Support
 		}
 		if a.Uncached() {
-			return -2 - a.Confidence
+			return -2 - a.Support
 		}
 		return -1
 	}
@@ -286,9 +300,12 @@ func RewriteWithPolicy(body []byte, lookup Lookup, policy RankPolicy) []byte {
 			continue
 		}
 		out.Write(block[:closeIdx])
-		out.WriteString(`<torznab:attr name="hearsay_confidence" value="` +
-			strconv.FormatFloat(a.Confidence, 'f', 2, 64) + `" />`)
-		if a.Sources > 0 || a.Coverage > 0 {
+		out.WriteString(`<torznab:attr name="hearsay_support" value="` +
+			strconv.FormatFloat(a.Support, 'f', 2, 64) + `" />`)
+		out.WriteString(`<torznab:attr name="hearsay_evidence_weight" value="` +
+			strconv.FormatFloat(a.EvidenceWeight, 'f', 2, 64) + `" />`)
+		out.WriteString(`<torznab:attr name="hearsay_state" value="` + a.State() + `" />`)
+		if a.State() != "unknown" {
 			out.WriteString(`<torznab:attr name="hearsay_cached" value="` +
 				strconv.FormatBool(a.Cached()) + `" />`)
 		}

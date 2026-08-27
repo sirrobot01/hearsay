@@ -26,6 +26,12 @@ func (d testDomain) Encode(subject any) (Key, error) {
 func (d testDomain) ValueType() ValueType { return d.vt }
 
 func (d testDomain) Decay(time.Duration) float64 { return 1 }
+func (d testDomain) Freshness() FreshnessPolicy {
+	if d.vt == Bool {
+		return FreshnessPolicy{Bucket: time.Hour, MaxAge: 24 * time.Hour}
+	}
+	return FreshnessPolicy{MaxAge: 24 * time.Hour}
+}
 
 func (d testDomain) Verify(subject any, outcome any) Truth {
 	switch o := outcome.(type) {
@@ -43,25 +49,20 @@ func (d testDomain) Verify(subject any, outcome any) Truth {
 func remoteGen(t *testing.T, h *Hearsay, id ed25519.PrivateKey, ns string, seq uint64, subjects map[string]float64, vt ValueType) {
 	t.Helper()
 	d := testDomain{ns, vt}
-	var payload []byte
-	if vt == Bool {
-		var keys []Key
-		for s, v := range subjects {
-			if v >= 0.5 {
-				k, _ := d.Encode(s)
-				keys = append(keys, k)
-			}
-		}
-		payload = encodeBoolPayload(keys)
-	} else {
-		m := map[Key]float64{}
-		for s, v := range subjects {
-			k, _ := d.Encode(s)
-			m[k] = v
-		}
-		payload = encodeScalarPayload(m)
+	now := time.Now()
+	observations := make(map[Key]Observation, len(subjects))
+	for subject, value := range subjects {
+		key, _ := d.Encode(subject)
+		observations[key] = Observation{Value: value, At: now}
 	}
-	g, err := BuildGeneration(id, ns, vt, seq, time.Now(), len(subjects), payload)
+	var payload []byte
+	var count int
+	if vt == Bool {
+		payload, count = encodeBoolPayload(observations, d.Freshness(), now)
+	} else {
+		payload, count = encodeScalarPayload(observations, d.Freshness(), now)
+	}
+	g, err := BuildGeneration(id, ns, vt, seq, now, count, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,8 +88,14 @@ func TestGroundTruthWins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !a.Local || a.Confidence != 1 || a.Value != 1 {
+	if !a.Known || !a.Local || a.Support != 1 || a.Value != 1 {
 		t.Fatalf("want authoritative local answer, got %+v", a)
+	}
+}
+
+func TestInvalidNamespace(t *testing.T) {
+	if _, err := New(t.TempDir(), testDomain{"../bad", Bool}); err == nil {
+		t.Fatal("invalid namespace accepted")
 	}
 }
 
@@ -112,15 +119,15 @@ func TestQueryRemoteSources(t *testing.T) {
 	if a.Value != 1 || a.Sources != 2 || a.Local {
 		t.Fatalf("got %+v", a)
 	}
-	if a.Confidence < 0.6 || a.Confidence > 0.7 {
-		t.Fatalf("confidence = %v, want 2/3", a.Confidence)
+	if a.Support < 0.6 || a.Support > 0.7 {
+		t.Fatalf("support = %v, want 2/3", a.Support)
 	}
 	if a.Coverage != 1 {
 		t.Fatalf("coverage = %v", a.Coverage)
 	}
 
 	a, _ = h.Query("ns.bool", "zzz")
-	if a.Sources != 0 || a.Confidence != 0 || a.Value != 0 {
+	if a.Known || a.Sources != 0 || a.Support != 0 || a.Value != 0 {
 		t.Fatalf("miss should be empty, got %+v", a)
 	}
 }
@@ -178,8 +185,142 @@ func TestScalarQuery(t *testing.T) {
 	if a.Value < 0.69 || a.Value > 0.71 {
 		t.Fatalf("weighted mean = %v, want 0.7", a.Value)
 	}
-	if a.Confidence != 1 {
-		t.Fatalf("confidence = %v", a.Confidence)
+	if !a.Known || a.Support != 1 {
+		t.Fatalf("support = %v", a.Support)
+	}
+}
+
+func TestExpiredLocalObservationIsUnknown(t *testing.T) {
+	h, err := New(t.TempDir(), testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := h.Observe("ns.bool", "old", 1, time.Now().Add(-25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := h.Query("ns.bool", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer.Known || answer.Local {
+		t.Fatalf("expired local observation answered: %+v", answer)
+	}
+}
+
+func TestQueryPair(t *testing.T) {
+	h, err := New(t.TempDir(), testDomain{"ns.positive", Bool}, testDomain{"ns.negative", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := h.Observe("ns.positive", "x", 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Observe("ns.negative", "x", 0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	paired, err := h.QueryPair("ns.positive", "ns.negative", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paired.State != EvidencePositive || !paired.Positive.Known || paired.Negative.Known {
+		t.Fatalf("positive pair = %+v", paired)
+	}
+	if err := h.Observe("ns.positive", "x", 0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Observe("ns.negative", "x", 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	paired, err = h.QueryPair("ns.positive", "ns.negative", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paired.State != EvidenceNegative || paired.Positive.Known || !paired.Negative.Known {
+		t.Fatalf("negative pair = %+v", paired)
+	}
+}
+
+func TestPublishPrunesExpiredTruth(t *testing.T) {
+	h, err := New(t.TempDir(), testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := h.Observe("ns.bool", "old", 1, time.Now().Add(-25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := h.Publish("ns.bool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation == nil || generation.Count != 0 {
+		t.Fatalf("expired truth generation = %+v", generation)
+	}
+	if len(h.store.truth["ns.bool"]) != 0 {
+		t.Fatal("expired truth remains in the store")
+	}
+}
+
+func TestRepublishDoesNotRefreshObservationAge(t *testing.T) {
+	dir := t.TempDir()
+	publisher, err := New(filepath.Join(dir, "publisher"), testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publisher.Close()
+	consumer, err := New(filepath.Join(dir, "consumer"), testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Close()
+
+	oldAt := time.Now().Add(-23 * time.Hour)
+	if err := publisher.Observe("ns.bool", "old", 1, oldAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.Publish("ns.bool"); err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Observe("ns.bool", "new", 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := publisher.Publish("ns.bool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := generation.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := consumer.Ingest(raw); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := consumer.Query("ns.bool", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !answer.Known || answer.Age < 22*time.Hour {
+		t.Fatalf("old claim was refreshed: %+v", answer)
+	}
+}
+
+func TestNewestSnapshotWithdrawsOlderClaim(t *testing.T) {
+	h, err := New(t.TempDir(), testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	_, publisher, _ := ed25519.GenerateKey(nil)
+	remoteGen(t, h, publisher, "ns.bool", 1, map[string]float64{"old": 1}, Bool)
+	remoteGen(t, h, publisher, "ns.bool", 2, map[string]float64{"new": 1}, Bool)
+	answer, err := h.Query("ns.bool", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer.Known {
+		t.Fatalf("withdrawn claim survived in an older snapshot: %+v", answer)
 	}
 }
 
@@ -244,10 +385,13 @@ func TestRetention(t *testing.T) {
 		t.Fatalf("retained %d gens starting at %d", len(gens), gens[0].Seq)
 	}
 	_, id2, _ := ed25519.GenerateKey(nil)
-	g, _ := BuildGeneration(id2, "ns.bool", Bool, 1, time.Now(), 1, encodeBoolPayload([]Key{{1}}))
+	now := time.Now()
+	payload, count := boolTestPayload([]Key{{1}}, now)
+	g, _ := BuildGeneration(id2, "ns.bool", Bool, 1, now, count, payload)
 	raw, _ := g.MarshalBinary()
 	h.Ingest(raw)
-	stale, _ := BuildGeneration(id2, "ns.bool", Bool, 1, time.Now(), 1, encodeBoolPayload([]Key{{2}}))
+	stalePayload, staleCount := boolTestPayload([]Key{{2}}, now)
+	stale, _ := BuildGeneration(id2, "ns.bool", Bool, 1, now, staleCount, stalePayload)
 	rawStale, _ := stale.MarshalBinary()
 	if _, err := h.Ingest(rawStale); err == nil {
 		t.Fatal("stale seq accepted")
@@ -263,7 +407,7 @@ func TestIngestRejectsFutureGeneration(t *testing.T) {
 	_, id, _ := ed25519.GenerateKey(nil)
 	d := testDomain{"ns.bool", Bool}
 	key, _ := d.Encode("abc")
-	payload := encodeBoolPayload([]Key{key})
+	payload, count := boolTestPayload([]Key{key}, time.Now())
 
 	for _, tc := range []struct {
 		name    string
@@ -275,7 +419,7 @@ func TestIngestRejectsFutureGeneration(t *testing.T) {
 		{"far future", time.Now().Add(100 * 365 * 24 * time.Hour), ErrFutureGeneration},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g, err := BuildGeneration(id, "ns.bool", Bool, 1, tc.builtAt, 1, payload)
+			g, err := BuildGeneration(id, "ns.bool", Bool, 1, tc.builtAt, count, payload)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -298,7 +442,8 @@ func TestFutureGenerationCannotOutlastDecay(t *testing.T) {
 	_, id, _ := ed25519.GenerateKey(nil)
 	d := testDomain{"ns.bool", Bool}
 	key, _ := d.Encode("abc")
-	g, _ := BuildGeneration(id, "ns.bool", Bool, 1, time.Now().Add(50*365*24*time.Hour), 1, encodeBoolPayload([]Key{key}))
+	payload, count := boolTestPayload([]Key{key}, time.Now())
+	g, _ := BuildGeneration(id, "ns.bool", Bool, 1, time.Now().Add(50*365*24*time.Hour), count, payload)
 	raw, _ := g.MarshalBinary()
 	h.Ingest(raw)
 
@@ -306,7 +451,7 @@ func TestFutureGenerationCannotOutlastDecay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Sources != 0 || a.Confidence != 0 {
+	if a.Known || a.Sources != 0 || a.Support != 0 {
 		t.Fatalf("future generation reached the query path: %+v", a)
 	}
 }

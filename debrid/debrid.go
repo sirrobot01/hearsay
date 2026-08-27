@@ -63,10 +63,14 @@ func (d Domain) ValueType() hearsay.ValueType {
 	return hearsay.Bool
 }
 
-// Decay halves confidence every 24 hours: debrid caches churn on a
+// Decay halves evidence weight every 24 hours: debrid caches churn on a
 // scale of hours to days.
 func (d Domain) Decay(age time.Duration) float64 {
 	return math.Exp2(-age.Hours() / 24)
+}
+
+func (d Domain) Freshness() hearsay.FreshnessPolicy {
+	return hearsay.FreshnessPolicy{Bucket: 6 * time.Hour, MaxAge: 7 * 24 * time.Hour}
 }
 
 // Verify interprets the result of actually adding the subject to the
@@ -110,11 +114,15 @@ func (d UncachedDomain) ValueType() hearsay.ValueType {
 	return hearsay.Bool
 }
 
-// Decay halves confidence every 6 hours, four times as fast as a
+// Decay halves evidence weight every 6 hours, four times as fast as a
 // cached claim: any operator's uncached download can flip the state
 // to cached at any moment, so the stale denial is the dangerous kind.
 func (d UncachedDomain) Decay(age time.Duration) float64 {
 	return math.Exp2(-age.Hours() / 6)
+}
+
+func (d UncachedDomain) Freshness() hearsay.FreshnessPolicy {
+	return hearsay.FreshnessPolicy{Bucket: time.Hour, MaxAge: 24 * time.Hour}
 }
 
 // Verify interprets the result of actually adding the subject: an

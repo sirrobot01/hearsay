@@ -472,6 +472,7 @@ type gossipMsg struct {
 }
 
 const (
+	gossipVersion       = 2
 	gossipMaxNamespaces = 16
 	gossipMaxFeeds      = 64
 	gossipMaxBytes      = 1 << 20
@@ -509,7 +510,7 @@ func (n *Node) exchange(ctx context.Context, addr string) {
 // write first.
 func (n *Node) talk(conn net.Conn) {
 	n.mu.Lock()
-	msg := gossipMsg{V: 1, Feeds: make(map[string][]string, len(n.known))}
+	msg := gossipMsg{V: gossipVersion, Feeds: make(map[string][]string, len(n.known))}
 	for ns, feeds := range n.known {
 		for id := range feeds {
 			msg.Feeds[ns] = append(msg.Feeds[ns], id)
@@ -525,6 +526,9 @@ func (n *Node) talk(conn net.Conn) {
 	err := json.NewDecoder(io.LimitReader(conn, gossipMaxBytes)).Decode(&theirs)
 	<-sent
 	if err != nil {
+		return
+	}
+	if theirs.V != gossipVersion {
 		return
 	}
 	nsCount := 0

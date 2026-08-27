@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ type Hearsay struct {
 	rep     *reputation
 
 	mu    sync.Mutex
-	dirty map[string]bool
+	dirty map[string]uint64
 }
 
 // New opens or creates a Hearsay instance in dir. The identity keypair
@@ -68,19 +69,36 @@ func New(dir string, domains ...Domain) (*Hearsay, error) {
 		domains: map[string]Domain{},
 		store:   st,
 		rep:     rep,
-		dirty:   map[string]bool{},
+		dirty:   map[string]uint64{},
 	}
 	for _, d := range domains {
 		ns := d.Namespace()
+		if !validNamespace(ns) {
+			return nil, fmt.Errorf("hearsay: invalid namespace %q", ns)
+		}
 		if _, dup := h.domains[ns]; dup {
 			return nil, fmt.Errorf("hearsay: duplicate namespace %q", ns)
 		}
+		policy := d.Freshness()
+		if policy.MaxAge <= 0 {
+			return nil, fmt.Errorf("hearsay: %q must declare a positive max age", ns)
+		}
+		if d.ValueType() == Bool && (policy.Bucket < time.Second || policy.Bucket > policy.MaxAge || policy.Bucket%time.Second != 0) {
+			return nil, fmt.Errorf("hearsay: %q has an invalid Boolean freshness bucket", ns)
+		}
 		h.domains[ns] = d
 	}
-	for ns := range h.domains {
+	for ns, domain := range h.domains {
+		pruned, err := st.pruneTruth(ns, time.Now().Add(-domain.Freshness().MaxAge))
+		if err != nil {
+			return nil, err
+		}
+		if pruned && h.Latest(ns, h.self) != nil {
+			h.dirty[ns]++
+		}
 		// BuiltAt is truncated to seconds, so allow that much slack.
 		if len(st.truth[ns]) > 0 && st.newestTruth(ns).After(h.latestBuilt(ns).Add(time.Second)) {
-			h.dirty[ns] = true
+			h.dirty[ns]++
 		}
 	}
 	return h, nil
@@ -139,10 +157,7 @@ func (h *Hearsay) Domain(ns string) (Domain, bool) {
 }
 
 func (h *Hearsay) Domains() []Domain {
-	ds := make([]Domain, 0, len(h.domains))
-	for _, d := range h.domains {
-		ds = append(ds, d)
-	}
+	ds := slices.Collect(maps.Values(h.domains))
 	slices.SortFunc(ds, func(a, b Domain) int {
 		return cmp.Compare(a.Namespace(), b.Namespace())
 	})
@@ -160,11 +175,17 @@ func (h *Hearsay) Observe(ns string, subject any, value float64, at time.Time) e
 	if err != nil {
 		return err
 	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return fmt.Errorf("hearsay: observation value must be finite")
+	}
+	if d.ValueType() == Bool && value != 0 && value != 1 {
+		return fmt.Errorf("hearsay: Boolean observation must be 0 or 1")
+	}
 	if err := h.store.observe(ns, key, value, at); err != nil {
 		return err
 	}
 	h.mu.Lock()
-	h.dirty[ns] = true
+	h.dirty[ns]++
 	h.mu.Unlock()
 	return nil
 }
@@ -186,26 +207,26 @@ func (h *Hearsay) Report(ns string, subject any, outcome any) error {
 		return err
 	}
 	var errs error
+	now := time.Now()
+	policy := d.Freshness()
 	h.store.mu.RLock()
 	for feed, gens := range h.store.feeds[ns] {
 		if feed == h.self {
 			continue
 		}
-		for i := len(gens) - 1; i >= 0; i-- {
-			v, ok := payloadLookup(gens[i].Type, gens[i].Payload, key)
-			if !ok {
-				continue
-			}
-			agree := math.Abs(v-truth.Value) <= 0.15
-			if d.ValueType() == Bool {
-				agree = (v >= 0.5) == (truth.Value >= 0.5)
-			}
-			errs = errors.Join(errs, h.rep.record(feed, agree))
-			break
+		latest := gens[len(gens)-1]
+		v, observedAt, ok := payloadLookup(latest.Type, latest.Payload, key)
+		if !ok || max(now.Sub(observedAt), 0) > policy.MaxAge {
+			continue
 		}
+		agree := math.Abs(v-truth.Value) <= 0.15
+		if d.ValueType() == Bool {
+			agree = (v >= 0.5) == (truth.Value >= 0.5)
+		}
+		errs = errors.Join(errs, h.rep.record(feed, agree))
 	}
 	h.store.mu.RUnlock()
-	return errors.Join(errs, h.Observe(ns, subject, truth.Value, time.Now()))
+	return errors.Join(errs, h.Observe(ns, subject, truth.Value, now))
 }
 
 // Publish builds a fresh generation from current local ground truth.
@@ -216,10 +237,18 @@ func (h *Hearsay) Publish(ns string) (*Generation, error) {
 	if !ok {
 		return nil, fmt.Errorf("hearsay: unknown namespace %q", ns)
 	}
+	now := time.Now()
+	pruned, err := h.store.pruneTruth(ns, now.Add(-d.Freshness().MaxAge))
+	if err != nil {
+		return nil, err
+	}
 	h.mu.Lock()
-	dirty := h.dirty[ns]
+	if pruned {
+		h.dirty[ns]++
+	}
+	revision := h.dirty[ns]
 	h.mu.Unlock()
-	if !dirty {
+	if revision == 0 {
 		return nil, nil
 	}
 
@@ -227,32 +256,20 @@ func (h *Hearsay) Publish(ns string) (*Generation, error) {
 	var payload []byte
 	var count int
 	if d.ValueType() == Bool {
-		var keys []Key
-		for k, o := range h.store.truth[ns] {
-			if o.Value >= 0.5 {
-				keys = append(keys, k)
-			}
-		}
-		count = len(keys)
-		payload = encodeBoolPayload(keys)
+		payload, count = encodeBoolPayload(h.store.truth[ns], d.Freshness(), now)
 	} else {
-		m := make(map[Key]float64, len(h.store.truth[ns]))
-		for k, o := range h.store.truth[ns] {
-			m[k] = o.Value
-		}
-		count = len(m)
-		payload = encodeScalarPayload(m)
+		payload, count = encodeScalarPayload(h.store.truth[ns], d.Freshness(), now)
 	}
 	seq := uint64(1)
 	if gens := h.store.feeds[ns][h.self]; len(gens) > 0 {
 		seq = gens[len(gens)-1].Seq + 1
 	}
 	h.store.mu.RUnlock()
-	if count == 0 {
-		return nil, nil
+	if uint64(count) > math.MaxUint32 {
+		return nil, fmt.Errorf("hearsay: generation has too many claims")
 	}
 
-	g, err := BuildGeneration(h.id, ns, d.ValueType(), seq, time.Now(), count, payload)
+	g, err := BuildGeneration(h.id, ns, d.ValueType(), seq, now, count, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +277,9 @@ func (h *Hearsay) Publish(ns string) (*Generation, error) {
 		return nil, err
 	}
 	h.mu.Lock()
-	h.dirty[ns] = false
+	if h.dirty[ns] == revision {
+		delete(h.dirty, ns)
+	}
 	h.mu.Unlock()
 	return g, nil
 }

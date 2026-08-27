@@ -13,7 +13,7 @@ import (
 )
 
 func TestAPI(t *testing.T) {
-	h, err := hearsay.New(t.TempDir(), debrid.New(debrid.RealDebrid))
+	h, err := hearsay.New(t.TempDir(), debrid.New(debrid.RealDebrid), debrid.NewUncached(debrid.RealDebrid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestAPI(t *testing.T) {
 	}
 	var a answer
 	json.NewDecoder(res.Body).Decode(&a)
-	if a.Value != true || a.Confidence != 1 || !a.Local {
+	if !a.Known || a.Value != true || a.Support != 1 || !a.Local {
 		t.Fatalf("claim = %+v", a)
 	}
 
@@ -55,8 +55,31 @@ func TestAPI(t *testing.T) {
 	if len(out.Answers) != 2 {
 		t.Fatalf("answers = %+v", out.Answers)
 	}
-	if out.Answers[0].Value != true || out.Answers[1].Value != false {
+	if out.Answers[0].Value != true || out.Answers[1].Known || out.Answers[1].Value != nil {
 		t.Fatalf("answers = %+v", out.Answers)
+	}
+
+	const missing = "ffffffffffffffffffffffffffffffffffffffff"
+	negative := `{"ns":"debrid.realdebrid.uncached","observations":[{"subject":"` + missing + `","value":true}]}`
+	if res, err = do(t, ts, "POST", "/v1/observations", negative); err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	evidenceBody := `{"positive_ns":"debrid.realdebrid.cached","negative_ns":"debrid.realdebrid.uncached","subjects":["` + ih + `","` + missing + `"]}`
+	res, err = do(t, ts, "POST", "/v1/evidence", evidenceBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidence struct {
+		Answers []struct {
+			State string `json:"state"`
+		} `json:"answers"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&evidence); err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Answers) != 2 || evidence.Answers[0].State != "positive" || evidence.Answers[1].State != "negative" {
+		t.Fatalf("evidence = %+v", evidence.Answers)
 	}
 
 	res, _ = do(t, ts, "GET", "/v1/claim?ns=nope&subject=x", "")

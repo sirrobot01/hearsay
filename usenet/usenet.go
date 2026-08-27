@@ -64,8 +64,8 @@ var resellers = map[string]string{
 	"newsdemon.com":     UsenetExpress,
 
 	// Abavia
-	"eweka.nl":       Abavia,
-	"pureusenet.nl":  Abavia,
+	"eweka.nl":        Abavia,
+	"pureusenet.nl":   Abavia,
 	"sunnyusenet.com": Abavia,
 
 	// Giganews
@@ -131,10 +131,14 @@ func (d Domain) ValueType() hearsay.ValueType {
 	return hearsay.Scalar
 }
 
-// Decay halves confidence every 60 days: completeness declines over
+// Decay halves evidence weight every 60 days: completeness declines over
 // months as takedowns land, monotonically.
 func (d Domain) Decay(age time.Duration) float64 {
 	return math.Exp2(-age.Hours() / (60 * 24))
+}
+
+func (d Domain) Freshness() hearsay.FreshnessPolicy {
+	return hearsay.FreshnessPolicy{MaxAge: 365 * 24 * time.Hour}
 }
 
 // Verify interprets a download attempt. A float64 is the completed

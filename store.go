@@ -1,11 +1,13 @@
 package hearsay
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -214,6 +216,54 @@ func (s *store) observe(ns string, key Key, value float64, at time.Time) error {
 	}
 	_, err := s.logs[ns].Write(appendTruthRec(nil, key, Observation{Value: value, At: at}))
 	return err
+}
+
+func (s *store) pruneTruth(ns string, cutoff time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := s.truth[ns]
+	if len(current) == 0 {
+		return false, nil
+	}
+	kept := make(map[Key]Observation, len(current))
+	for key, observation := range current {
+		if !observation.At.Before(cutoff) {
+			kept[key] = observation
+		}
+	}
+	if len(kept) == len(current) {
+		return false, nil
+	}
+	if file := s.logs[ns]; file != nil {
+		if err := file.Close(); err != nil {
+			return false, err
+		}
+		delete(s.logs, ns)
+	}
+
+	path := filepath.Join(s.dir, "truth", ns+".truth")
+	if len(kept) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+		delete(s.truth, ns)
+		return true, nil
+	}
+	keys := slices.SortedFunc(maps.Keys(kept), func(a, b Key) int { return bytes.Compare(a[:], b[:]) })
+	raw := make([]byte, 0, len(keys)*truthRecLen)
+	for _, key := range keys {
+		raw = appendTruthRec(raw, key, kept[key])
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return false, err
+	}
+	s.truth[ns] = kept
+	return true, nil
 }
 
 func (s *store) addGeneration(g *Generation) error {

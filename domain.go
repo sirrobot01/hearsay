@@ -1,6 +1,9 @@
 package hearsay
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Key is a derived subject identifier. Adapters must derive it
 // deterministically so that independent implementations agree on the
@@ -22,6 +25,13 @@ type Truth struct {
 	Value float64
 }
 
+// FreshnessPolicy bounds evidence lifetime. Boolean observations are
+// grouped into Bucket intervals so their age survives Bloom encoding.
+type FreshnessPolicy struct {
+	Bucket time.Duration
+	MaxAge time.Duration
+}
+
 // Domain is a pluggable observation domain. It deliberately exposes no
 // method that queries the observed system: adapters only receive
 // observations that fall out of work the host application was doing
@@ -39,11 +49,28 @@ type Domain interface {
 	// payload semantics.
 	ValueType() ValueType
 
-	// Decay is the confidence multiplier for an observation of the
+	// Decay is the evidence multiplier for an observation of the
 	// given age, in [0, 1].
 	Decay(age time.Duration) float64
+
+	// Freshness defines claim-age encoding and expiry.
+	Freshness() FreshnessPolicy
 
 	// Verify converts the outcome of acting on a hint into ground
 	// truth. An unknown Truth means the outcome revealed nothing.
 	Verify(subject any, outcome any) Truth
+}
+
+func validNamespace(namespace string) bool {
+	if len(namespace) == 0 || len(namespace) > 59 || strings.HasPrefix(namespace, ".") ||
+		strings.HasSuffix(namespace, ".") || strings.Contains(namespace, "..") {
+		return false
+	}
+	for _, char := range namespace {
+		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '.' || char == '-' || char == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }

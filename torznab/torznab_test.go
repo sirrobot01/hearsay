@@ -34,8 +34,8 @@ const fixture = `<?xml version="1.0" encoding="UTF-8"?>
 
 func TestRewrite(t *testing.T) {
 	answers := map[string]Claim{
-		"aaaa": {Subject: "aaaa", Confidence: 0.1, Sources: 2, Coverage: 0.5},
-		"bbbb": {Subject: "bbbb", Confidence: 0.92, Sources: 4, Coverage: 0.8},
+		"aaaa": {Subject: "aaaa", Support: 0.1, Sources: 2, Coverage: 0.5},
+		"bbbb": {Subject: "bbbb", Support: 0.92, Sources: 4, Coverage: 0.8},
 	}
 	out := string(Rewrite([]byte(fixture), func(subjects []string) (map[string]Claim, error) {
 		if len(subjects) != 2 {
@@ -53,8 +53,11 @@ func TestRewrite(t *testing.T) {
 	if bIdx == -1 || aIdx == -1 || cIdx == -1 || bIdx > aIdx || aIdx > cIdx {
 		t.Fatalf("order wrong: B=%d A=%d C=%d", bIdx, aIdx, cIdx)
 	}
-	if !strings.Contains(out, `name="hearsay_confidence" value="0.92"`) {
-		t.Fatal("confidence attribute missing")
+	if !strings.Contains(out, `name="hearsay_support" value="0.92"`) {
+		t.Fatal("support attribute missing")
+	}
+	if !strings.Contains(out, `name="hearsay_state" value="cached"`) {
+		t.Fatal("state attribute missing")
 	}
 	if !strings.Contains(out, `name="hearsay_cached" value="true"`) {
 		t.Fatal("cached attribute missing")
@@ -75,9 +78,9 @@ func TestRewritePassThrough(t *testing.T) {
 	}
 	broken := []byte(`<rss><channel><item><torznab:attr name="infohash" value="aa" /></item>`)
 	got := Rewrite(broken, func([]string) (map[string]Claim, error) {
-		return map[string]Claim{"aa": {Subject: "aa", Confidence: 1, Sources: 1}}, nil
+		return map[string]Claim{"aa": {Subject: "aa", Support: 1, Sources: 1}}, nil
 	})
-	if !strings.Contains(string(got), "hearsay_confidence") {
+	if !strings.Contains(string(got), "hearsay_support") {
 		t.Fatal("valid prefix of truncated doc not annotated")
 	}
 }
@@ -85,7 +88,7 @@ func TestRewritePassThrough(t *testing.T) {
 func TestRewriteDoesNotPromoteBelowThreshold(t *testing.T) {
 	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
 		return map[string]Claim{
-			"bbbb": {Subject: "bbbb", Confidence: 0.49, Sources: 1, Coverage: 1},
+			"bbbb": {Subject: "bbbb", Support: 0.49, Sources: 1, Coverage: 1},
 		}, nil
 	}))
 	if !strings.Contains(out, `name="hearsay_cached" value="true"`) {
@@ -101,9 +104,9 @@ func TestRewriteDoesNotPromoteBelowThreshold(t *testing.T) {
 func TestRewriteUsesConfiguredPolicy(t *testing.T) {
 	out := string(RewriteWithPolicy([]byte(fixture), func([]string) (map[string]Claim, error) {
 		return map[string]Claim{
-			"bbbb": {Subject: "bbbb", Confidence: 0.49, Sources: 1, Coverage: 1},
+			"bbbb": {Subject: "bbbb", Support: 0.49, Sources: 1, Coverage: 1},
 		}, nil
-	}, RankPolicy{MinConfidence: 0.4, MinSources: 1, MaxAge: time.Hour}))
+	}, RankPolicy{MinSupport: 0.4, MinSources: 1, MaxAge: time.Hour}))
 	bIdx := strings.Index(out, "Release.B")
 	aIdx := strings.Index(out, "Release.A")
 	if bIdx == -1 || aIdx == -1 || bIdx > aIdx {
@@ -114,7 +117,7 @@ func TestRewriteUsesConfiguredPolicy(t *testing.T) {
 func TestRewriteDemotesLocalNegative(t *testing.T) {
 	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
 		return map[string]Claim{
-			"aaaa": {Subject: "aaaa", Value: new(false), Confidence: 1, Sources: 1, Local: true},
+			"aaaa": {Subject: "aaaa", Known: true, Value: new(false), Support: 1, Sources: 1, Local: true},
 		}, nil
 	}))
 	aIdx := strings.Index(out, "Release.A")
@@ -131,7 +134,7 @@ func TestRewriteDemotesLocalNegative(t *testing.T) {
 func TestRewriteDemotesDenied(t *testing.T) {
 	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
 		return map[string]Claim{
-			"aaaa": {Subject: "aaaa", Confidence: 0.8, Sources: 2, Coverage: 1, Denied: true},
+			"aaaa": {Subject: "aaaa", Support: 0.8, Sources: 2, Coverage: 1, Denied: true},
 		}, nil
 	}))
 	aIdx := strings.Index(out, "Release.A")
@@ -145,16 +148,17 @@ func TestRewriteDemotesDenied(t *testing.T) {
 	}
 }
 
-// TestRewriteMarksUnclaimed checks a covered namespace with no
-// claiming source still reports false rather than being promoted.
-func TestRewriteMarksUnclaimed(t *testing.T) {
+func TestRewriteMarksUnknown(t *testing.T) {
 	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
 		return map[string]Claim{
-			"aaaa": {Subject: "aaaa", Confidence: 0, Sources: 0, Coverage: 1},
+			"aaaa": {Subject: "aaaa", Support: 0, Sources: 0, Coverage: 1},
 		}, nil
 	}))
-	if !strings.Contains(out, `name="hearsay_cached" value="false"`) {
-		t.Error("unclaimed subject not marked false")
+	if !strings.Contains(out, `name="hearsay_state" value="unknown"`) {
+		t.Error("unclaimed subject not marked unknown")
+	}
+	if strings.Contains(out, `name="hearsay_cached" value="false"`) {
+		t.Error("unknown subject marked uncached")
 	}
 }
 
@@ -171,7 +175,7 @@ func TestProxyRewritesSearch(t *testing.T) {
 		Upstream: upstream.URL + "/",
 		Lookup: func([]string) (map[string]Claim, error) {
 			return map[string]Claim{
-				"bbbb": {Subject: "bbbb", Confidence: 0.9, Sources: 3, Coverage: 1},
+				"bbbb": {Subject: "bbbb", Support: 0.9, Sources: 3, Coverage: 1},
 			}, nil
 		},
 	}
@@ -184,7 +188,7 @@ func TestProxyRewritesSearch(t *testing.T) {
 	if bIdx == -1 || aIdx == -1 || bIdx > aIdx {
 		t.Errorf("claimed release not promoted: B=%d A=%d", bIdx, aIdx)
 	}
-	if !strings.Contains(out, "hearsay_confidence") {
+	if !strings.Contains(out, "hearsay_support") {
 		t.Error("attributes missing")
 	}
 }

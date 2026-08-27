@@ -19,8 +19,8 @@ import (
 // fans out to the closest nodes and logs every one that does not
 // answer at warning level; a get logs every node that answers wrong.
 // Both are routine — the operation succeeds on the nodes that do
-// answer — but the target of a pointer is SHA1(pubkey ++ namespace)
-// and never changes, so the same unresponsive neighbour is re-selected
+// answer — but the target of a pointer is versioned and never changes,
+// so the same unresponsive neighbour is re-selected
 // and re-logged on every republish, forever. The caller reports the
 // outcome that matters: whether the whole operation failed.
 func quietDHT(ctx context.Context) context.Context {
@@ -40,14 +40,19 @@ type Pointer struct {
 
 // Topic is the synthetic DHT rendezvous for a namespace.
 func Topic(ns string) [20]byte {
-	return sha1.Sum([]byte("hearsay:v1:" + ns))
+	return sha1.Sum([]byte("hearsay:v2:" + ns))
 }
 
 func pointerTarget(pub ed25519.PublicKey, ns string) bep44.Target {
-	return sha1.Sum(append(append(make([]byte, 0, 32+len(ns)), pub...), ns...))
+	salt := pointerSalt(ns)
+	return sha1.Sum(append(append(make([]byte, 0, 32+len(salt)), pub...), salt...))
 }
 
-// PutPointer publishes the pointer under SHA1(pubkey ++ namespace) on
+func pointerSalt(ns string) []byte {
+	return []byte("hsy2:" + ns)
+}
+
+// PutPointer publishes the pointer under the versioned identity and namespace on
 // every DHT server the node runs. Items expire in roughly two hours;
 // callers republish continuously.
 func (n *Node) PutPointer(ctx context.Context, id ed25519.PrivateKey, ns string, p Pointer) error {
@@ -58,7 +63,7 @@ func (n *Node) PutPointer(ctx context.Context, id ed25519.PrivateKey, ns string,
 	pub := id.Public().(ed25519.PublicKey)
 	var k [32]byte
 	copy(k[:], pub)
-	salt := []byte(ns)
+	salt := pointerSalt(ns)
 	target := pointerTarget(pub, ns)
 	ctx = quietDHT(ctx)
 	errs := errors.New("transport: no dht servers")
@@ -80,7 +85,7 @@ func (n *Node) PutPointer(ctx context.Context, id ed25519.PrivateKey, ns string,
 // namespace. The DHT is a refresh channel, not storage: callers cache
 // pointers locally.
 func (n *Node) GetPointer(ctx context.Context, pub ed25519.PublicKey, ns string) (Pointer, error) {
-	salt := []byte(ns)
+	salt := pointerSalt(ns)
 	target := pointerTarget(pub, ns)
 	ctx = quietDHT(ctx)
 	errs := errors.New("transport: no dht servers")

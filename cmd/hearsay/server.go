@@ -26,6 +26,7 @@ func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/claim", s.claim)
 	mux.HandleFunc("POST /v1/claims", s.claims)
+	mux.HandleFunc("POST /v1/evidence", s.evidence)
 	mux.HandleFunc("POST /v1/observations", s.observations)
 	mux.HandleFunc("POST /v1/outcomes", s.outcomes)
 	mux.HandleFunc("GET /v1/status", s.status)
@@ -79,27 +80,33 @@ func (s *server) allowedHost(host string) bool {
 // answer is the wire form of a hint. Never a bare boolean: callers
 // set their own thresholds.
 type answer struct {
-	Subject    string  `json:"subject,omitempty"`
-	Value      any     `json:"value"`
-	Confidence float64 `json:"confidence"`
-	Sources    int     `json:"sources"`
-	AgeSeconds int64   `json:"age_seconds"`
-	Coverage   float64 `json:"coverage"`
-	Local      bool    `json:"local,omitempty"`
+	Subject        string  `json:"subject,omitempty"`
+	Known          bool    `json:"known"`
+	Value          any     `json:"value"`
+	Support        float64 `json:"support"`
+	EvidenceWeight float64 `json:"evidence_weight"`
+	Sources        int     `json:"sources"`
+	AgeSeconds     int64   `json:"age_seconds"`
+	Coverage       float64 `json:"coverage"`
+	Local          bool    `json:"local,omitzero"`
 }
 
 func toAnswer(d hearsay.Domain, subject string, a hearsay.Answer) answer {
 	out := answer{
-		Subject:    subject,
-		Value:      a.Value,
-		Confidence: a.Confidence,
-		Sources:    a.Sources,
-		AgeSeconds: int64(a.Age.Seconds()),
-		Coverage:   a.Coverage,
-		Local:      a.Local,
+		Subject:        subject,
+		Known:          a.Known,
+		Support:        a.Support,
+		EvidenceWeight: a.EvidenceWeight,
+		Sources:        a.Sources,
+		AgeSeconds:     int64(a.Age.Seconds()),
+		Coverage:       a.Coverage,
+		Local:          a.Local,
 	}
-	if d.ValueType() == hearsay.Bool {
-		out.Value = a.Value >= 0.5
+	if a.Known {
+		out.Value = a.Value
+		if d.ValueType() == hearsay.Bool {
+			out.Value = a.Value >= 0.5
+		}
 	}
 	return out
 }
@@ -156,6 +163,49 @@ func (s *server) claims(w http.ResponseWriter, r *http.Request) {
 		answers = append(answers, toAnswer(d, subject, a))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ns": req.NS, "answers": answers})
+}
+
+func (s *server) evidence(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PositiveNS string   `json:"positive_ns"`
+		NegativeNS string   `json:"negative_ns"`
+		Subjects   []string `json:"subjects"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	positiveDomain, positiveOK := s.h.Domain(req.PositiveNS)
+	negativeDomain, negativeOK := s.h.Domain(req.NegativeNS)
+	if !positiveOK || !negativeOK || positiveDomain.ValueType() != hearsay.Bool || negativeDomain.ValueType() != hearsay.Bool {
+		http.Error(w, "paired evidence requires two Boolean namespaces", http.StatusNotFound)
+		return
+	}
+	type pairedAnswer struct {
+		Subject  string `json:"subject"`
+		State    string `json:"state"`
+		Positive answer `json:"positive"`
+		Negative answer `json:"negative"`
+	}
+	answers := make([]pairedAnswer, 0, len(req.Subjects))
+	for _, subject := range req.Subjects {
+		paired, err := s.h.QueryPair(req.PositiveNS, req.NegativeNS, subject)
+		if err != nil {
+			answers = append(answers, pairedAnswer{Subject: subject, State: string(hearsay.EvidenceUnknown)})
+			continue
+		}
+		answers = append(answers, pairedAnswer{
+			Subject:  subject,
+			State:    string(paired.State),
+			Positive: toAnswer(positiveDomain, "", paired.Positive),
+			Negative: toAnswer(negativeDomain, "", paired.Negative),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"positive_ns": req.PositiveNS,
+		"negative_ns": req.NegativeNS,
+		"answers":     answers,
+	})
 }
 
 func (s *server) observations(w http.ResponseWriter, r *http.Request) {

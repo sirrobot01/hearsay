@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"math"
 	"time"
 )
 
@@ -31,7 +32,7 @@ type Generation struct {
 	Sig       [64]byte
 }
 
-const genMagic = "HSY1"
+const genMagic = "HSY2"
 
 // maxSkew bounds how far ahead of local time a generation's BuiltAt may
 // be. BuiltAt is the publisher's own claim, and Decay grows without
@@ -69,7 +70,7 @@ func (g *Generation) body() []byte {
 
 func (g *Generation) rotationMsg() []byte {
 	b := make([]byte, 0, 26+len(g.Namespace)+40)
-	b = append(b, "hearsay:v1:rotate:"...)
+	b = append(b, "hearsay:v2:rotate:"...)
 	b = append(b, g.Namespace...)
 	b = binary.BigEndian.AppendUint64(b, g.Seq)
 	b = append(b, g.GenKey[:]...)
@@ -79,6 +80,20 @@ func (g *Generation) rotationMsg() []byte {
 // BuildGeneration signs a payload into a generation using a fresh
 // per-generation key, bound to the identity key by a rotation proof.
 func BuildGeneration(identity ed25519.PrivateKey, ns string, vt ValueType, seq uint64, builtAt time.Time, count int, payload []byte) (*Generation, error) {
+	builtAt = builtAt.UTC().Truncate(time.Second)
+	if len(identity) != ed25519.PrivateKeySize || !validNamespace(ns) || count < 0 || uint64(count) > math.MaxUint32 {
+		return nil, ErrInvalidGeneration
+	}
+	valid := false
+	switch vt {
+	case Bool:
+		valid = validBoolPayload(payload, uint32(count), builtAt)
+	case Scalar, Enum:
+		valid = validScalarPayload(payload, uint32(count), builtAt)
+	}
+	if !valid {
+		return nil, ErrInvalidGeneration
+	}
 	genPub, genPriv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		return nil, err
@@ -87,7 +102,7 @@ func BuildGeneration(identity ed25519.PrivateKey, ns string, vt ValueType, seq u
 		Namespace: ns,
 		Type:      vt,
 		Seq:       seq,
-		BuiltAt:   builtAt.UTC().Truncate(time.Second),
+		BuiltAt:   builtAt,
 		Count:     uint32(count),
 		Payload:   payload,
 	}
@@ -118,6 +133,9 @@ func ParseGeneration(raw []byte) (*Generation, error) {
 		return nil, ErrInvalidGeneration
 	}
 	g := &Generation{Namespace: string(raw[i : i+int(nsLen)])}
+	if !validNamespace(g.Namespace) {
+		return nil, ErrInvalidGeneration
+	}
 	i += int(nsLen)
 	if i+21 > len(raw) {
 		return nil, ErrInvalidGeneration
@@ -144,7 +162,16 @@ func ParseGeneration(raw []byte) (*Generation, error) {
 	i += copy(g.GenKey[:], raw[i:])
 	i += copy(g.KeyProof[:], raw[i:])
 	copy(g.Sig[:], raw[i:])
-	if g.Type == Bool && !validBoolPayload(g.Payload, g.Count) {
+	switch g.Type {
+	case Bool:
+		if !validBoolPayload(g.Payload, g.Count, g.BuiltAt) {
+			return nil, ErrInvalidGeneration
+		}
+	case Scalar, Enum:
+		if !validScalarPayload(g.Payload, g.Count, g.BuiltAt) {
+			return nil, ErrInvalidGeneration
+		}
+	default:
 		return nil, ErrInvalidGeneration
 	}
 	if !ed25519.Verify(g.Identity[:], g.rotationMsg(), g.KeyProof[:]) {
