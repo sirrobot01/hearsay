@@ -37,6 +37,7 @@ type Hearsay struct {
 	domains map[string]Domain
 	store   *store
 	rep     *reputation
+	metrics *metricsLedger
 
 	mu    sync.Mutex
 	dirty map[string]uint64
@@ -45,9 +46,6 @@ type Hearsay struct {
 // New opens or creates a Hearsay instance in dir. The identity keypair
 // is generated on first run; no accounts, no registration.
 func New(dir string, domains ...Domain) (*Hearsay, error) {
-	if len(domains) == 0 {
-		return nil, errors.New("hearsay: at least one domain required")
-	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -63,12 +61,17 @@ func New(dir string, domains ...Domain) (*Hearsay, error) {
 	if err != nil {
 		return nil, err
 	}
+	metrics, err := openMetricsLedger(filepath.Join(dir, "metrics.json"))
+	if err != nil {
+		return nil, err
+	}
 	h := &Hearsay{
 		id:      id,
 		self:    hex.EncodeToString(id.Public().(ed25519.PublicKey)),
 		domains: map[string]Domain{},
 		store:   st,
 		rep:     rep,
+		metrics: metrics,
 		dirty:   map[string]uint64{},
 	}
 	for _, d := range domains {
@@ -187,6 +190,7 @@ func (h *Hearsay) Observe(ns string, subject any, value float64, at time.Time) e
 	if err := h.store.observe(ns, key, value, at); err != nil {
 		return err
 	}
+	h.metrics.recordObservation(ns)
 	h.mu.Lock()
 	h.dirty[ns]++
 	h.mu.Unlock()
@@ -212,6 +216,7 @@ func (h *Hearsay) Report(ns string, subject any, outcome any) error {
 	now := time.Now()
 	policy := d.Freshness()
 	outcomes := map[string]bool{}
+	agreements := 0
 	h.store.mu.RLock()
 	for feed, gens := range h.store.feeds[ns] {
 		if feed == h.self {
@@ -227,9 +232,14 @@ func (h *Hearsay) Report(ns string, subject any, outcome any) error {
 			agree = (v >= 0.5) == (truth.Value >= 0.5)
 		}
 		outcomes[feed] = agree
+		if agree {
+			agreements++
+		}
 	}
 	h.store.mu.RUnlock()
-	return errors.Join(h.rep.recordMany(outcomes), h.Observe(ns, subject, truth.Value, now))
+	err = errors.Join(h.rep.recordMany(outcomes), h.Observe(ns, subject, truth.Value, now))
+	h.metrics.recordOutcome(ns, len(outcomes), agreements)
+	return err
 }
 
 // Publish builds a fresh generation from current local ground truth.
@@ -279,6 +289,7 @@ func (h *Hearsay) Publish(ns string) (*Generation, error) {
 	if err := h.store.addGeneration(g, h.self); err != nil {
 		return nil, err
 	}
+	h.metrics.recordPublished(ns)
 	h.mu.Lock()
 	if h.dirty[ns] == revision {
 		delete(h.dirty, ns)
@@ -288,7 +299,9 @@ func (h *Hearsay) Publish(ns string) (*Generation, error) {
 }
 
 // Ingest verifies and retains a generation received from the network.
-func (h *Hearsay) Ingest(raw []byte) (*Generation, error) {
+func (h *Hearsay) Ingest(raw []byte) (generation *Generation, err error) {
+	ns := ""
+	defer func() { h.metrics.recordIngest(ns, err == nil) }()
 	g, err := ParseGeneration(raw)
 	if err != nil {
 		return nil, err
@@ -297,6 +310,7 @@ func (h *Hearsay) Ingest(raw []byte) (*Generation, error) {
 	if !ok {
 		return nil, fmt.Errorf("hearsay: unknown namespace %q", g.Namespace)
 	}
+	ns = g.Namespace
 	if g.Type != d.ValueType() {
 		return nil, fmt.Errorf("hearsay: value type mismatch for %q", g.Namespace)
 	}
@@ -348,9 +362,18 @@ func (h *Hearsay) PruneFeedsBefore(ns string, cutoff time.Time) ([]string, error
 	if _, ok := h.domains[ns]; !ok {
 		return nil, fmt.Errorf("hearsay: unknown namespace %q", ns)
 	}
-	return h.store.pruneFeedsBefore(ns, h.self, cutoff)
+	removed, err := h.store.pruneFeedsBefore(ns, h.self, cutoff)
+	if err == nil {
+		h.metrics.recordFeedsPruned(ns, len(removed))
+	}
+	return removed, err
+}
+
+// Metrics returns a consistent snapshot of local engine activity.
+func (h *Hearsay) Metrics() EngineMetrics {
+	return h.metrics.snapshot()
 }
 
 func (h *Hearsay) Close() error {
-	return h.store.close()
+	return errors.Join(h.store.close(), h.metrics.close())
 }

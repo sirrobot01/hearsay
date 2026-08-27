@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
@@ -42,7 +43,7 @@ func serveCmd() *cobra.Command {
 	return cmd
 }
 
-func serve(configPath, listen string) error {
+func serve(configPath, listen string) (result error) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -59,11 +60,18 @@ func serve(configPath, listen string) error {
 	for _, b := range cfg.Adapters.Usenet {
 		domains = append(domains, usenet.New(b))
 	}
+	participates := cfg.Hearsay.Participates()
+	if cfg.Hearsay.Publish && !participates {
+		return fmt.Errorf("hearsay.publish requires hearsay.participate: true")
+	}
+	if participates && len(domains) == 0 {
+		return fmt.Errorf("network participation requires at least one configured adapter")
+	}
 	h, err := hearsay.New(cfg.Dir, domains...)
 	if err != nil {
 		return err
 	}
-	defer h.Close()
+	defer func() { result = errors.Join(result, h.Close()) }()
 	self := hex.EncodeToString(h.Identity())
 	log.Info("identity", "pubkey", "ed25519:"+self)
 
@@ -75,14 +83,15 @@ func serve(configPath, listen string) error {
 
 	// A non-empty follow list is an allowlist, not a set of extra seeds:
 	// resolve it before the node starts so discovery never runs.
-	var follow []string
+	followSet := map[string]struct{}{}
 	for _, f := range cfg.Hearsay.Follow {
 		key, err := f.Key()
 		if err != nil {
 			return err
 		}
-		follow = append(follow, key)
+		followSet[key] = struct{}{}
 	}
+	follow := slices.Sorted(maps.Keys(followSet))
 	// Retained generations answer queries on their own, whether or not
 	// the network is running, so narrow the store before anything reads
 	// it: an allowlist has to drop what an earlier run discovered.
@@ -105,7 +114,18 @@ func serve(configPath, listen string) error {
 	defer stop()
 
 	var node *transport.Node
-	if cfg.Hearsay.Enabled {
+	if participates {
+		maxFeeds := cfg.Hearsay.MaxFeeds
+		if maxFeeds == 0 {
+			maxFeeds = transport.DefaultMaxFeedsPerNamespace
+		}
+		requiredFeeds := len(follow)
+		if cfg.Hearsay.Publish && !slices.Contains(follow, self) {
+			requiredFeeds++
+		}
+		if maxFeeds > 0 && requiredFeeds > maxFeeds {
+			return fmt.Errorf("follow list and local publisher require %d feed slots; configured maximum is %d", requiredFeeds, maxFeeds)
+		}
 		var interval time.Duration
 		if cfg.Hearsay.Interval != "" {
 			if interval, err = time.ParseDuration(cfg.Hearsay.Interval); err != nil {
@@ -122,7 +142,7 @@ func serve(configPath, listen string) error {
 		if err != nil {
 			return err
 		}
-		defer node.Close()
+		defer func() { result = errors.Join(result, node.Close()) }()
 		if len(follow) > 0 {
 			node.Allow(append(slices.Clone(follow), self)...)
 			log.Info("following an explicit publisher set; discovery and gossip cannot add to it", "publishers", len(follow))
@@ -131,7 +151,7 @@ func serve(configPath, listen string) error {
 			ns := d.Namespace()
 			node.Track(ns)
 			for _, key := range follow {
-				node.AddFeed(ns, key)
+				node.PinFeed(ns, key)
 			}
 		}
 		syncer := &transport.Syncer{
@@ -143,10 +163,20 @@ func serve(configPath, listen string) error {
 		}
 		go syncer.Run(ctx)
 	} else {
-		log.Info("network participation disabled; local ground truth only")
+		log.Info("local-only mode; network participation requires explicit consent")
+	}
+	if len(domains) == 0 {
+		log.Info("no namespaces active; configure only the adapters this host uses")
 	}
 
-	api := &server{h: h, node: node, token: token, hosts: cfg.AllowedHosts}
+	api := &server{
+		h:             h,
+		node:          node,
+		token:         token,
+		hosts:         cfg.AllowedHosts,
+		participating: participates,
+		publishing:    participates && cfg.Hearsay.Publish,
+	}
 	srv := &http.Server{Addr: cfg.Listen, Handler: api.mux()}
 	go func() {
 		<-ctx.Done()

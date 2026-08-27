@@ -24,7 +24,7 @@ On Linux or macOS, run the install script:
 curl -fsSL https://hearsay.decypharr.com/install.sh | sh
 ```
 
-The script installs the correct binary for your system, verifies its checksum, and registers a service (systemd on Linux, launchd on macOS). The daemon then runs and starts on boot.
+The script installs the correct binary for your system, verifies its checksum, and registers a service (systemd on Linux, launchd on macOS). The service starts local-only: it does not join the DHT or publish anything until you opt in through configuration.
 
 On Windows, download the zip from the [releases page](https://github.com/sirrobot01/hearsay/releases). Releases cover Linux, macOS, and Windows, on amd64 and arm64, with a `checksums.txt`.
 
@@ -40,7 +40,7 @@ go build ./cmd/hearsay
 hearsay serve
 ```
 
-No configuration is necessary. The daemon creates a keypair on the first run, publishes your observations, and discovers publishers on the DHT. It works behind CGNAT. To change defaults:
+With no configuration, the daemon creates its local API identity and stays off the network with no active namespaces. Configure only the adapters this host actually uses, then opt into network participation and publishing separately:
 
 ```yaml
 # Loaded from <user config dir>/hearsay/config.yaml if present,
@@ -49,18 +49,22 @@ dir: /var/lib/hearsay
 listen: "127.0.0.1:8477"
 allowed_hosts: []      # extra Host header values; IPs and localhost always pass
 hearsay:
-  enabled: true        # one flag to disable all network participation
-  publish: true        # contribute observations
+  participate: true    # explicitly join the DHT, fetch, and relay
+  publish: true        # separately consent to share your observations
   interval: "30m"      # publish and fetch cycle
   port: 0              # swarm listen port; 0 = random
   gossip_port: 0       # discovery listen port; 0 = random
   max_storage_bytes: 1073741824 # cap relayed generation blobs at 1 GiB
   max_feeds_per_namespace: 256  # bound discovered publisher metadata
-  follow: []           # empty = discover on the DHT; non-empty = allowlist
+  follow: []           # empty = discover; non-empty = publisher allowlist
 adapters:
-  debrid: [realdebrid, alldebrid, torbox, premiumize]
-  usenet: [omicron, usenetexpress, abavia]
+  debrid: [realdebrid] # activates cached and uncached namespaces
+  usenet: []
 ```
+
+`participate: true, publish: false` is reader/relay mode: your IP joins the selected public namespace topics, fetched generations are relayed, and your observations remain local. The legacy `enabled` key is still accepted as a participation opt-in, but `publish` must now be explicit.
+
+`hearsay status` shows the effective participation mode, active namespaces, query coverage, verified source accuracy, retry/quarantine counts, and bounded swarm storage. Engine counters persist locally across restarts.
 
 ## HTTP API
 
@@ -145,7 +149,7 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 - Hearsay publishes only what you observed through real work, never what you searched for. A failure is an observation too: an incomplete usenet download, or a torrent add that was not served from cache, publishes a claim — and that claim tells the network you attempted the subject. Disable `publish` to contribute nothing.
 - Bloom filters are testable, not enumerable. An adversary cannot list your subjects, but can test one they already hold.
 - Each generation carries a fresh signing key. Your long-term identity signs that key, and the identity is in every generation. The identity is also the key that others follow you by. All of your generations therefore stay linkable to each other and to you. The fresh key does not prevent this. It only limits what a leaked signing key can forge.
-- DHT topics are public: participation puts your IP on a per-namespace list. Set `enabled: false` to opt out of everything.
+- DHT topics are public: participation puts your IP on a per-namespace list. Network participation defaults off; omit `participate` or set it to `false` to stay local-only.
 
 ## Protocol notes
 

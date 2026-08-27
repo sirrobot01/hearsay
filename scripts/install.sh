@@ -3,7 +3,7 @@
 #
 # Downloads the release binary for this system, verifies its checksum,
 # installs it, and registers a service (systemd on Linux, launchd on
-# macOS) that runs "hearsay serve".
+# macOS) that runs "hearsay serve" in local-only mode until configured.
 #
 #   HEARSAY_VERSION      install this tag instead of the latest release
 #   HEARSAY_INSTALL_DIR  install here instead of /usr/local/bin
@@ -120,6 +120,7 @@ main() {
     fi
     say "installing to $INSTALL_DIR/hearsay"
     $SUDO install -m 755 "$tmp/hearsay" "$INSTALL_DIR/hearsay"
+    say "network participation and publishing remain off until explicitly enabled in config.yaml"
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) ;;
         *) say "note: $INSTALL_DIR is not in your PATH" ;;

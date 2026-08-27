@@ -16,10 +16,12 @@ import (
 )
 
 type server struct {
-	h     *hearsay.Hearsay
-	node  *transport.Node
-	token string
-	hosts []string // extra Host header values to accept, from config
+	h             *hearsay.Hearsay
+	node          *transport.Node
+	token         string
+	hosts         []string // extra Host header values to accept, from config
+	participating bool
+	publishing    bool
 }
 
 func (s *server) mux() http.Handler {
@@ -221,6 +223,10 @@ func (s *server) observations(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	if _, ok := s.h.Domain(req.NS); !ok {
+		http.Error(w, "unknown namespace", http.StatusNotFound)
+		return
+	}
 	accepted := 0
 	for _, o := range req.Observations {
 		v, ok := toFloat(o.Value)
@@ -268,6 +274,11 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"identity":   "ed25519:" + hex.EncodeToString(s.h.Identity()),
 		"namespaces": namespaces,
+		"participation": map[string]bool{
+			"network":    s.participating,
+			"publishing": s.publishing,
+		},
+		"metrics": s.h.Metrics(),
 	}
 	if s.node != nil {
 		out["transport"] = s.node.Stats()

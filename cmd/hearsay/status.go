@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sirrobot01/hearsay"
 	"github.com/sirrobot01/hearsay/transport"
 )
 
@@ -59,7 +60,12 @@ func status(base, token string, all bool) error {
 			Namespace string `json:"namespace"`
 			Feeds     int    `json:"feeds"`
 		} `json:"namespaces"`
-		Transport *transport.Stats `json:"transport"`
+		Participation struct {
+			Network    bool `json:"network"`
+			Publishing bool `json:"publishing"`
+		} `json:"participation"`
+		Metrics   hearsay.EngineMetrics `json:"metrics"`
+		Transport *transport.Stats      `json:"transport"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&st); err != nil {
 		return err
@@ -67,17 +73,38 @@ func status(base, token string, all bool) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "Identity\t%s\n", st.Identity)
+	mode := "local only"
+	if st.Participation.Network {
+		mode = "network reader and relay"
+	}
+	if st.Participation.Publishing {
+		mode = "network publisher and relay"
+	}
+	fmt.Fprintf(w, "Mode\t%s\n", mode)
+	fmt.Fprintf(w, "Activity\t%d observations, %d queries, %d outcomes\n",
+		st.Metrics.Observations, st.Metrics.Queries, st.Metrics.Outcomes)
 	fmt.Fprintln(w)
-	// ANNOUNCING counts peers that have the namespace enabled, which is
-	// not the same as peers that have ever published in it: a default
-	// install enables every adapter and announces all of them at once.
-	fmt.Fprintln(w, "NAMESPACE\tSOURCES WITH DATA\tPEERS ANNOUNCING")
+	if len(st.Namespaces) == 0 {
+		fmt.Fprintln(w, "No namespaces configured.")
+	} else {
+		fmt.Fprintln(w, "NAMESPACE\tSOURCES\tQUERIES\tKNOWN\tOUTCOMES\tSOURCE ACCURACY\tPEERS")
+	}
 	for _, ns := range st.Namespaces {
+		metrics := st.Metrics.Namespaces[ns.Namespace]
 		announcing := "-"
 		if st.Transport != nil {
 			announcing = fmt.Sprintf("%d", st.Transport.Feeds[ns.Namespace])
 		}
-		fmt.Fprintf(w, "%s\t%d\t%s\n", ns.Namespace, ns.Feeds, announcing)
+		known := "-"
+		if metrics.Queries > 0 {
+			known = fmt.Sprintf("%.1f%%", 100*metrics.KnownRate())
+		}
+		accuracy := "-"
+		if metrics.VerifiedClaims > 0 {
+			accuracy = fmt.Sprintf("%.1f%%", 100*metrics.SourceAccuracy())
+		}
+		fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%d\t%s\t%s\n",
+			ns.Namespace, ns.Feeds, metrics.Queries, known, metrics.Outcomes, accuracy, announcing)
 	}
 	fmt.Fprintln(w)
 	if st.Transport == nil {
@@ -87,6 +114,15 @@ func status(base, token string, all bool) error {
 	fmt.Fprintf(w, "Swarm port\t%d\n", st.Transport.SwarmPort)
 	fmt.Fprintf(w, "Gossip port\t%d\n", st.Transport.GossipPort)
 	fmt.Fprintf(w, "Swarm storage\t%s / %s\n", humanSize(st.Transport.StoredBytes), humanSize(st.Transport.MaxStorage))
+	var retrying, quarantined int
+	for _, count := range st.Transport.RetryingFeeds {
+		retrying += count
+	}
+	for _, count := range st.Transport.QuarantinedFeeds {
+		quarantined += count
+	}
+	fmt.Fprintf(w, "Feed health\t%d retrying, %d quarantined, %d max per namespace\n",
+		retrying, quarantined, st.Transport.MaxFeedsPerNamespace)
 	fmt.Fprintln(w)
 	blobs := st.Transport.Torrents
 	if len(blobs) == 0 {
@@ -106,9 +142,7 @@ func status(base, token string, all bool) error {
 	fmt.Fprintf(w, "Generation blobs\t%d held, %s, %d incomplete, %d active peers\n",
 		len(blobs), humanSize(size), partial, peers)
 
-	// A relay accumulates one blob per retained generation and seeds
-	// them all, so the full list grows without bound and is almost
-	// entirely complete and idle. Show only what is still moving.
+	// Most retained blobs are complete and idle, so show only what is moving.
 	shown := blobs
 	if !all {
 		shown = nil

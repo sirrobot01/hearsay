@@ -33,12 +33,11 @@ func (h *Hearsay) Query(ns string, subject any) (Answer, error) {
 	policy := domain.Freshness()
 
 	h.store.mu.RLock()
-	defer h.store.mu.RUnlock()
 
 	if observation, ok := h.store.truth[ns][key]; ok {
 		age := max(now.Sub(observation.At), 0)
 		if age <= policy.MaxAge {
-			return Answer{
+			answer := Answer{
 				Known:          true,
 				Value:          observation.Value,
 				Support:        1,
@@ -47,7 +46,10 @@ func (h *Hearsay) Query(ns string, subject any) (Answer, error) {
 				Age:            age,
 				Coverage:       1,
 				Local:          true,
-			}, nil
+			}
+			h.store.mu.RUnlock()
+			h.metrics.recordQuery(ns, answer)
+			return answer, nil
 		}
 	}
 
@@ -111,6 +113,8 @@ func (h *Hearsay) Query(ns string, subject any) (Answer, error) {
 			answer.Value = valueSum / score
 		}
 	}
+	h.store.mu.RUnlock()
+	h.metrics.recordQuery(ns, answer)
 	return answer, nil
 }
 

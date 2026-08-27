@@ -18,6 +18,17 @@ type testDomain struct {
 	vt ValueType
 }
 
+func TestNewWithoutDomainsIsLocalAndInactive(t *testing.T) {
+	h, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if len(h.Domains()) != 0 {
+		t.Fatalf("domains = %v", h.Domains())
+	}
+}
+
 func (d testDomain) Namespace() string { return d.ns }
 
 func (d testDomain) Encode(subject any) (Key, error) {

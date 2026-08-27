@@ -81,10 +81,30 @@ func TestAPI(t *testing.T) {
 	if len(evidence.Answers) != 2 || evidence.Answers[0].State != "positive" || evidence.Answers[1].State != "negative" {
 		t.Fatalf("evidence = %+v", evidence.Answers)
 	}
+	res.Body.Close()
 
 	res, _ = do(t, ts, "GET", "/v1/claim?ns=nope&subject=x", "")
 	if res.StatusCode != 404 {
 		t.Fatalf("status = %d", res.StatusCode)
+	}
+	res.Body.Close()
+
+	res, err = do(t, ts, "GET", "/v1/status", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var status struct {
+		Participation struct {
+			Network bool `json:"network"`
+		} `json:"participation"`
+		Metrics hearsay.EngineMetrics `json:"metrics"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Participation.Network || status.Metrics.Queries == 0 {
+		t.Fatalf("status = %+v", status)
 	}
 }
 
