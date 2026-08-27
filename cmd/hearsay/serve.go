@@ -56,9 +56,10 @@ func serve(configPath, listen string) (result error) {
 
 	domains := domainsFromConfig(cfg)
 	participates := cfg.Hearsay.Participates()
-	if cfg.Hearsay.Publish && !participates {
+	if cfg.Hearsay.Publish != nil && *cfg.Hearsay.Publish && !participates {
 		return fmt.Errorf("hearsay.publish requires hearsay.participate: true")
 	}
+	publishes := cfg.Hearsay.Publishes()
 	if participates && len(domains) == 0 {
 		return fmt.Errorf("network participation requires at least one configured adapter")
 	}
@@ -115,7 +116,7 @@ func serve(configPath, listen string) (result error) {
 			maxFeeds = transport.DefaultMaxFeedsPerNamespace
 		}
 		requiredFeeds := len(follow)
-		if cfg.Hearsay.Publish && !slices.Contains(follow, self) {
+		if publishes && !slices.Contains(follow, self) {
 			requiredFeeds++
 		}
 		if maxFeeds > 0 && requiredFeeds > maxFeeds {
@@ -152,13 +153,13 @@ func serve(configPath, listen string) (result error) {
 		syncer := &transport.Syncer{
 			Engine:   h,
 			Node:     node,
-			Publish:  cfg.Hearsay.Publish,
+			Publish:  publishes,
 			Interval: interval,
 			Log:      log,
 		}
 		go syncer.Run(ctx)
 	} else {
-		log.Info("local-only mode; network participation requires explicit consent")
+		log.Info("local-only mode configured")
 	}
 	if len(domains) == 0 {
 		log.Info("no namespaces active; configure only the adapters this host uses")
@@ -170,7 +171,7 @@ func serve(configPath, listen string) (result error) {
 		token:         token,
 		hosts:         cfg.AllowedHosts,
 		participating: participates,
-		publishing:    participates && cfg.Hearsay.Publish,
+		publishing:    publishes,
 	}
 	srv := &http.Server{Addr: cfg.Listen, Handler: api.mux()}
 	go func() {

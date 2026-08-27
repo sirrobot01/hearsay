@@ -3,28 +3,37 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/sirrobot01/hearsay/debrid"
 	"github.com/sirrobot01/hearsay/swarm"
+	"github.com/sirrobot01/hearsay/usenet"
 )
 
-func TestConfigDefaultsAreLocalAndInactive(t *testing.T) {
+func TestConfigDefaultsPublishAllNamespaces(t *testing.T) {
 	cfg, err := loadConfig(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Hearsay.Participates() || cfg.Hearsay.Publish {
-		t.Fatalf("network enabled by default: %+v", cfg.Hearsay)
+	if !cfg.Hearsay.Participates() || !cfg.Hearsay.Publishes() {
+		t.Fatalf("network defaults disabled: %+v", cfg.Hearsay)
 	}
-	if len(cfg.Adapters.Debrid) != 0 || len(cfg.Adapters.Usenet) != 0 || cfg.Adapters.Torrent {
-		t.Fatalf("adapters enabled by default: %+v", cfg.Adapters)
+	if !slices.Equal(cfg.Adapters.Debrid, debrid.Providers) ||
+		!slices.Equal(cfg.Adapters.Usenet, usenet.Backbones) || !cfg.Adapters.Torrent {
+		t.Fatalf("adapter defaults = %+v", cfg.Adapters)
+	}
+	domains := domainsFromConfig(cfg)
+	want := 2*len(debrid.Providers) + len(usenet.Backbones) + 1
+	if len(domains) != want || domains[len(domains)-1].Namespace() != swarm.Namespace {
+		t.Fatalf("domains = %v", domains)
 	}
 }
 
-func TestConfigRequiresExplicitParticipation(t *testing.T) {
+func TestConfigHonorsExplicitNetworkAndAdapterOptOut(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	raw := []byte("hearsay:\n  participate: true\n  publish: true\nadapters:\n  debrid: [realdebrid]\n  torrent: true\n")
+	raw := []byte("hearsay:\n  participate: false\n  publish: false\nadapters:\n  debrid: []\n  usenet: []\n  torrent: false\n")
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -32,16 +41,29 @@ func TestConfigRequiresExplicitParticipation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Hearsay.Participates() || !cfg.Hearsay.Publish || len(cfg.Adapters.Debrid) != 1 || !cfg.Adapters.Torrent {
+	if cfg.Hearsay.Participates() || cfg.Hearsay.Publishes() {
 		t.Fatalf("config = %+v", cfg)
 	}
-	domains := domainsFromConfig(cfg)
-	if len(domains) != 3 || domains[2].Namespace() != swarm.Namespace {
-		t.Fatalf("domains = %v", domains)
+	if len(domainsFromConfig(cfg)) != 0 {
+		t.Fatalf("adapters enabled: %+v", cfg.Adapters)
 	}
 }
 
-func TestLegacyEnabledStillOptsIn(t *testing.T) {
+func TestConfigSupportsReaderRelayMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("hearsay:\n  publish: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Hearsay.Participates() || cfg.Hearsay.Publishes() {
+		t.Fatalf("config = %+v", cfg.Hearsay)
+	}
+}
+
+func TestLegacyConfigRetainsNetworkDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("hearsay:\n  enabled: true\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -50,8 +72,26 @@ func TestLegacyEnabledStillOptsIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Hearsay.Participates() {
-		t.Fatal("legacy explicit opt-in was lost")
+	if !cfg.Hearsay.Participates() || !cfg.Hearsay.Publishes() {
+		t.Fatalf("legacy network defaults lost: %+v", cfg.Hearsay)
+	}
+	if !slices.Equal(cfg.Adapters.Debrid, debrid.Providers) ||
+		!slices.Equal(cfg.Adapters.Usenet, usenet.Backbones) || !cfg.Adapters.Torrent {
+		t.Fatalf("legacy adapter defaults lost: %+v", cfg.Adapters)
+	}
+}
+
+func TestLegacyNetworkOptOutDoesNotPublish(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("hearsay:\n  enabled: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Hearsay.Participates() || cfg.Hearsay.Publishes() {
+		t.Fatalf("legacy network opt-out lost: %+v", cfg.Hearsay)
 	}
 }
 

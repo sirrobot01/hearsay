@@ -9,12 +9,16 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sirrobot01/hearsay/debrid"
+	"github.com/sirrobot01/hearsay/usenet"
 )
 
-// Config defaults to a local-only daemon with no active namespaces.
+// Config preserves the standalone daemon's zero-config network behavior.
 type Config struct {
 	Dir string `yaml:"dir"`
 	// Listen is the HTTP API address. Keep it on loopback unless the
@@ -35,7 +39,7 @@ type Config struct {
 type NetworkConfig struct {
 	Participate *bool    `yaml:"participate"`
 	Enabled     *bool    `yaml:"enabled"`
-	Publish     bool     `yaml:"publish"`
+	Publish     *bool    `yaml:"publish"`
 	Interval    string   `yaml:"interval"`
 	Port        int      `yaml:"port"`
 	GossipPort  int      `yaml:"gossip_port"`
@@ -48,7 +52,14 @@ func (c NetworkConfig) Participates() bool {
 	if c.Participate != nil {
 		return *c.Participate
 	}
-	return c.Enabled != nil && *c.Enabled
+	if c.Enabled != nil {
+		return *c.Enabled
+	}
+	return true
+}
+
+func (c NetworkConfig) Publishes() bool {
+	return c.Participates() && (c.Publish == nil || *c.Publish)
 }
 
 type Follow struct {
@@ -57,8 +68,8 @@ type Follow struct {
 }
 
 // defaultConfigPath is where serve looks without --config, e.g.
-// ~/.config/hearsay/config.yaml on Linux. A missing file means
-// defaults: zero-config stays zero-config.
+// ~/.config/hearsay/config.yaml on Linux. A missing file uses the
+// standalone daemon defaults.
 func defaultConfigPath() string {
 	base, err := os.UserConfigDir()
 	if err != nil {
@@ -69,6 +80,7 @@ func defaultConfigPath() string {
 
 func loadConfig(path string) (Config, error) {
 	var c Config
+	c.Adapters.Torrent = true
 	raw, err := os.ReadFile(path)
 	if err != nil && !(path == "" || errors.Is(err, fs.ErrNotExist)) {
 		return c, err
@@ -92,6 +104,12 @@ func loadConfig(path string) (Config, error) {
 	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8477"
+	}
+	if c.Adapters.Debrid == nil {
+		c.Adapters.Debrid = slices.Clone(debrid.Providers)
+	}
+	if c.Adapters.Usenet == nil {
+		c.Adapters.Usenet = slices.Clone(usenet.Backbones)
 	}
 	return c, nil
 }

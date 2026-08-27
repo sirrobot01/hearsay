@@ -24,7 +24,7 @@ On Linux or macOS, run the install script:
 curl -fsSL https://hearsay.decypharr.com/install.sh | sh
 ```
 
-The script installs the correct binary for your system, verifies its checksum, and registers a service (systemd on Linux, launchd on macOS). The service starts local-only: it does not join the DHT or publish anything until you opt in through configuration.
+The script installs the correct binary for your system, verifies its checksum, and registers a service (systemd on Linux, launchd on macOS). The standalone service joins the network and publishes observations in every built-in namespace by default.
 
 On Windows, download the zip from the [releases page](https://github.com/sirrobot01/hearsay/releases). Releases cover Linux, macOS, and Windows, on amd64 and arm64, with a `checksums.txt`.
 
@@ -40,7 +40,7 @@ go build ./cmd/hearsay
 hearsay serve
 ```
 
-With no configuration, the daemon creates its local API identity and stays off the network with no active namespaces. Configure only the adapters this host actually uses, then opt into network participation and publishing separately:
+With no configuration, the standalone daemon joins the network, publishes observations, and enables every built-in adapter. These defaults preserve the behavior of existing installations across upgrades. Create a configuration file to narrow the active namespaces or opt out:
 
 ```yaml
 # Loaded from <user config dir>/hearsay/config.yaml if present,
@@ -49,8 +49,8 @@ dir: /var/lib/hearsay
 listen: "127.0.0.1:8477"
 allowed_hosts: []      # extra Host header values; IPs and localhost always pass
 hearsay:
-  participate: true    # explicitly join the DHT, fetch, and relay
-  publish: true        # separately consent to share your observations
+  participate: true    # join the DHT, fetch, and relay
+  publish: true        # share your observations
   interval: "30m"      # publish and fetch cycle
   port: 0              # swarm listen port; 0 = random
   gossip_port: 0       # discovery listen port; 0 = random
@@ -63,7 +63,9 @@ adapters:
   torrent: false       # activates public-torrent availability
 ```
 
-`participate: true, publish: false` is reader/relay mode: your IP joins the selected public namespace topics, fetched generations are relayed, and your observations remain local. The legacy `enabled` key is still accepted as a participation opt-in, but `publish` must now be explicit.
+Omitting `participate` or `publish` keeps it enabled. Omitting an adapter list enables every built-in value in that category; use `[]` to disable the category. The torrent adapter also defaults on.
+
+`participate: true, publish: false` is reader/relay mode: your IP joins the selected public namespace topics, fetched generations are relayed, and your observations remain local. Set `participate: false` for local-only mode. The legacy `enabled` key remains accepted as a participation override.
 
 `hearsay status` shows the effective participation mode, active namespaces, query coverage, verified source accuracy, retry/quarantine counts, and bounded swarm storage. Engine counters persist locally across restarts.
 
@@ -156,7 +158,7 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 - Bloom filters are testable, not enumerable. An adversary cannot list your subjects, but can test one they already hold.
 - Scalar generations expose derived subject keys, values, and observation times. The original subject is not present, but an adversary can test a candidate they already know. Usenet completeness and public-torrent availability use scalar payloads.
 - Each generation carries a fresh signing key. Your long-term identity signs that key, and the identity is in every generation. The identity is also the key that others follow you by. All of your generations therefore stay linkable to each other and to you. The fresh key does not prevent this. It only limits what a leaked signing key can forge.
-- DHT topics are public: participation puts your IP on a per-namespace list. Network participation defaults off; omit `participate` or set it to `false` to stay local-only.
+- DHT topics are public: participation puts your IP on a per-namespace list. The standalone daemon participates and publishes by default; set `participate: false` to stay local-only or `publish: false` to remain a reader and relay.
 
 ## Protocol notes
 
