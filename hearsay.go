@@ -227,7 +227,7 @@ func (h *Hearsay) Report(ns string, subject any, outcome any) error {
 		if !ok || max(now.Sub(observedAt), 0) > policy.MaxAge {
 			continue
 		}
-		agree := math.Abs(v-truth.Value) <= 0.15
+		agree := math.Abs(v-truth.Value) <= scalarAgreementTolerance
 		if d.ValueType() == Bool {
 			agree = (v >= 0.5) == (truth.Value >= 0.5)
 		}

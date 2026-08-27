@@ -1,8 +1,10 @@
 package hearsay
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"time"
 )
@@ -53,9 +55,10 @@ func (h *Hearsay) Query(ns string, subject any) (Answer, error) {
 		}
 	}
 
-	var score, total, valueSum float64
+	var score, total float64
 	var covering, hits int
 	minAge := time.Duration(-1)
+	var scalarClaims []weightedClaim
 	feedIDs := slices.Collect(maps.Keys(h.store.feeds[ns]))
 	feedIDs = slices.DeleteFunc(feedIDs, func(feed string) bool { return feed == h.self })
 	weights := h.rep.weights(feedIDs)
@@ -79,11 +82,14 @@ func (h *Hearsay) Query(ns string, subject any) (Answer, error) {
 			continue
 		}
 		weighted := weight * evidenceWeight(domain, age)
-		score += weighted
-		valueSum += weighted * value
 		hits++
-		if minAge < 0 || age < minAge {
-			minAge = age
+		if domain.ValueType() == Bool {
+			score += weighted
+			if minAge < 0 || age < minAge {
+				minAge = age
+			}
+		} else {
+			scalarClaims = append(scalarClaims, weightedClaim{value: value, weight: weighted, age: age})
 		}
 	}
 
@@ -96,26 +102,77 @@ func (h *Hearsay) Query(ns string, subject any) (Answer, error) {
 		}
 	}
 
-	answer := Answer{Known: hits > 0, Sources: hits, EvidenceWeight: score}
+	answer := Answer{Known: hits > 0}
 	if len(knownFeeds) > 0 {
 		answer.Coverage = float64(covering) / float64(len(knownFeeds))
 	}
-	if total > 0 {
-		answer.Support = min(score/total, 1)
-	}
-	if minAge >= 0 {
-		answer.Age = minAge
-	}
-	if score > 0 {
-		if domain.ValueType() == Bool {
+	if domain.ValueType() == Bool {
+		answer.Sources = hits
+		answer.EvidenceWeight = score
+		if total > 0 {
+			answer.Support = min(score/total, 1)
+		}
+		if minAge >= 0 {
+			answer.Age = minAge
+		}
+		if score > 0 {
 			answer.Value = 1
-		} else {
-			answer.Value = valueSum / score
+		}
+	} else if len(scalarClaims) > 0 {
+		answer.Value, answer.EvidenceWeight, answer.Sources, answer.Age = resolveScalar(scalarClaims)
+		if total > 0 {
+			answer.Support = min(answer.EvidenceWeight/total, 1)
 		}
 	}
 	h.store.mu.RUnlock()
 	h.metrics.recordQuery(ns, answer)
 	return answer, nil
+}
+
+type weightedClaim struct {
+	value  float64
+	weight float64
+	age    time.Duration
+}
+
+func resolveScalar(claims []weightedClaim) (value, evidence float64, sources int, age time.Duration) {
+	slices.SortFunc(claims, func(a, b weightedClaim) int { return cmp.Compare(a.value, b.value) })
+	var total float64
+	for _, claim := range claims {
+		total += claim.weight
+	}
+	half := total / 2
+	var cumulative float64
+	for i, claim := range claims {
+		cumulative += claim.weight
+		if cumulative < half {
+			continue
+		}
+		value = claim.value
+		if math.Abs(cumulative-half) <= 1e-12*max(total, 1) && i+1 < len(claims) {
+			value = (claim.value + claims[i+1].value) / 2
+		}
+		break
+	}
+	age = -1
+	for _, claim := range claims {
+		if math.Abs(claim.value-value) > scalarAgreementTolerance {
+			continue
+		}
+		evidence += claim.weight
+		sources++
+		if age < 0 || claim.age < age {
+			age = claim.age
+		}
+	}
+	if age < 0 {
+		for _, claim := range claims {
+			if age < 0 || claim.age < age {
+				age = claim.age
+			}
+		}
+	}
+	return value, evidence, sources, age
 }
 
 func evidenceWeight(domain Domain, age time.Duration) float64 {

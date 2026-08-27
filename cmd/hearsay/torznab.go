@@ -1,8 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,11 +11,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sirrobot01/hearsay"
+	hearsayclient "github.com/sirrobot01/hearsay/client"
 	"github.com/sirrobot01/hearsay/torznab"
 )
 
 func torznabCmd() *cobra.Command {
-	client := &http.Client{Timeout: 2 * time.Minute}
+	httpClient := &http.Client{Timeout: 2 * time.Minute}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	var listen, upstream, hearsayd, token, ns, denialNS string
 	policy := torznab.DefaultRankPolicy()
@@ -46,11 +47,13 @@ func torznabCmd() *cobra.Command {
 			}
 			hearsayd = strings.TrimSuffix(hearsayd, "/")
 			log.Info("proxying", "listen", listen, "upstream", upstream, "ns", ns)
+			api := hearsayclient.New(hearsayd, token)
+			api.HTTPClient = httpClient
 			p := &torznab.Proxy{
-				Upstream: upstream,
-				Client:   client,
-				Lookup:   daemonLookup(client, hearsayd, token, ns, denialNS),
-				Policy:   policy,
+				Upstream:      upstream,
+				Client:        httpClient,
+				ContextLookup: daemonLookup(api, ns, denialNS),
+				Policy:        policy,
 			}
 			return http.ListenAndServe(listen, p)
 		},
@@ -70,49 +73,20 @@ func torznabCmd() *cobra.Command {
 }
 
 // daemonLookup resolves complementary namespaces through the batch evidence API.
-func daemonLookup(client *http.Client, hearsayd, token, positiveNS, negativeNS string) torznab.Lookup {
-	return func(subjects []string) (map[string]torznab.Claim, error) {
-		reqBody, err := json.Marshal(map[string]any{
-			"positive_ns": positiveNS,
-			"negative_ns": negativeNS,
-			"subjects":    subjects,
-		})
+func daemonLookup(api *hearsayclient.Client, positiveNS, negativeNS string) torznab.ContextLookup {
+	return func(ctx context.Context, subjects []string) (map[string]torznab.Claim, error) {
+		paired, err := api.Evidence(ctx, positiveNS, negativeNS, subjects)
 		if err != nil {
 			return nil, err
 		}
-		req, err := http.NewRequest(http.MethodPost, hearsayd+"/v1/evidence", bytes.NewReader(reqBody))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+token)
-		res, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("hearsayd: %s", res.Status)
-		}
-		var out struct {
-			Answers []struct {
-				Subject  string        `json:"subject"`
-				State    string        `json:"state"`
-				Positive torznab.Claim `json:"positive"`
-				Negative torznab.Claim `json:"negative"`
-			} `json:"answers"`
-		}
-		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
-			return nil, err
-		}
-		answers := make(map[string]torznab.Claim, len(out.Answers))
-		for _, answer := range out.Answers {
+		answers := make(map[string]torznab.Claim, len(paired))
+		for _, answer := range paired {
 			var claim torznab.Claim
 			switch answer.State {
-			case "positive":
-				claim = answer.Positive
-			case "negative":
-				claim = answer.Negative
+			case hearsay.EvidencePositive:
+				claim = toTorznabClaim(answer.Positive)
+			case hearsay.EvidenceNegative:
+				claim = toTorznabClaim(answer.Negative)
 				claim.Denied = true
 			default:
 				claim.Coverage = max(answer.Positive.Coverage, answer.Negative.Coverage)
@@ -122,4 +96,21 @@ func daemonLookup(client *http.Client, hearsayd, token, positiveNS, negativeNS s
 		}
 		return answers, nil
 	}
+}
+
+func toTorznabClaim(answer hearsayclient.Answer) torznab.Claim {
+	claim := torznab.Claim{
+		Subject:        answer.Subject,
+		Known:          answer.Known,
+		Support:        answer.Support,
+		EvidenceWeight: answer.EvidenceWeight,
+		Sources:        answer.Sources,
+		AgeSeconds:     answer.AgeSeconds,
+		Coverage:       answer.Coverage,
+		Local:          answer.Local,
+	}
+	if value, ok := answer.BoolValue(); ok {
+		claim.Value = new(value)
+	}
+	return claim
 }

@@ -209,6 +209,35 @@ func TestScalarQuery(t *testing.T) {
 	}
 }
 
+func TestScalarSupportRequiresAgreement(t *testing.T) {
+	h, err := New(t.TempDir(), testDomain{"ns.scalar", Scalar})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	_, a1, _ := ed25519.GenerateKey(nil)
+	_, a2, _ := ed25519.GenerateKey(nil)
+	_, a3, _ := ed25519.GenerateKey(nil)
+	remoteGen(t, h, a1, "ns.scalar", 1, map[string]float64{"majority": 0, "tie": 0}, Scalar)
+	remoteGen(t, h, a2, "ns.scalar", 1, map[string]float64{"majority": 1, "tie": 1}, Scalar)
+	remoteGen(t, h, a3, "ns.scalar", 1, map[string]float64{"majority": 1}, Scalar)
+
+	majority, err := h.Query("ns.scalar", "majority")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if majority.Value != 1 || majority.Sources != 2 || majority.Support < 0.66 || majority.Support > 0.67 {
+		t.Fatalf("majority = %+v", majority)
+	}
+	tie, err := h.Query("ns.scalar", "tie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tie.Value != 0.5 || tie.Sources != 0 || tie.Support != 0 || tie.EvidenceWeight != 0 {
+		t.Fatalf("tie = %+v", tie)
+	}
+}
+
 func TestExpiredLocalObservationIsUnknown(t *testing.T) {
 	h, err := New(t.TempDir(), testDomain{"ns.bool", Bool})
 	if err != nil {

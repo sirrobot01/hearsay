@@ -10,10 +10,11 @@ package torznab
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"io"
 	"net/http"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -112,6 +113,9 @@ func (p RankPolicy) Accepts(c Claim) bool {
 // carry explicit negative evidence.
 type Lookup func(subjects []string) (map[string]Claim, error)
 
+// ContextLookup is a cancellation-aware Lookup for network-backed integrations.
+type ContextLookup func(ctx context.Context, subjects []string) (map[string]Claim, error)
+
 // Proxy forwards every request to Upstream unchanged. On successful
 // search results it annotates each release with hearsay attributes and
 // moves claimed-cached releases to the top. On any failure the
@@ -123,6 +127,8 @@ type Proxy struct {
 	Upstream string
 	// Lookup answers the infohash subjects found in a result page.
 	Lookup Lookup
+	// ContextLookup takes precedence over Lookup when set.
+	ContextLookup ContextLookup
 	// Client issues upstream requests. Nil means a client with a
 	// 2-minute timeout.
 	Client *http.Client
@@ -168,7 +174,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	out := RewriteWithPolicy(body, p.Lookup, p.Policy)
+	lookup := p.Lookup
+	if p.ContextLookup != nil {
+		lookup = func(subjects []string) (map[string]Claim, error) {
+			return p.ContextLookup(r.Context(), subjects)
+		}
+	}
+	out := RewriteWithPolicy(body, lookup, p.Policy)
 	copyHeaders(w, res)
 	w.WriteHeader(res.StatusCode)
 	w.Write(out)
@@ -249,6 +261,9 @@ func Rewrite(body []byte, lookup Lookup) []byte {
 
 // RewriteWithPolicy applies an explicit ranking policy.
 func RewriteWithPolicy(body []byte, lookup Lookup, policy RankPolicy) []byte {
+	if lookup == nil {
+		return body
+	}
 	items := splitItems(body)
 	if len(items) == 0 {
 		return body
@@ -284,8 +299,16 @@ func RewriteWithPolicy(body []byte, lookup Lookup, policy RankPolicy) []byte {
 		}
 		return -1
 	}
-	sort.SliceStable(items, func(i, j int) bool {
-		return rank(items[i]) > rank(items[j])
+	slices.SortStableFunc(items, func(a, b item) int {
+		aRank, bRank := rank(a), rank(b)
+		switch {
+		case aRank > bRank:
+			return -1
+		case aRank < bRank:
+			return 1
+		default:
+			return 0
+		}
 	})
 
 	var out bytes.Buffer

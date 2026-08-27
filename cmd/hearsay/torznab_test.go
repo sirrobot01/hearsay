@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	hearsayclient "github.com/sirrobot01/hearsay/client"
 	"github.com/sirrobot01/hearsay/torznab"
 )
 
@@ -18,7 +19,9 @@ func TestDaemonLookupPreservesLocalNegative(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	claims, err := daemonLookup(ts.Client(), ts.URL, "token", "positive", "negative")([]string{"abc"})
+	api := hearsayclient.New(ts.URL, "token")
+	api.HTTPClient = ts.Client()
+	claims, err := daemonLookup(api, "positive", "negative")(t.Context(), []string{"abc"})
 	if err != nil {
 		t.Fatal(err)
 	}

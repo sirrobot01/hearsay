@@ -19,6 +19,7 @@ import (
 
 	"github.com/sirrobot01/hearsay"
 	"github.com/sirrobot01/hearsay/debrid"
+	"github.com/sirrobot01/hearsay/swarm"
 	"github.com/sirrobot01/hearsay/transport"
 	"github.com/sirrobot01/hearsay/usenet"
 )
@@ -53,13 +54,7 @@ func serve(configPath, listen string) (result error) {
 		cfg.Listen = listen
 	}
 
-	var domains []hearsay.Domain
-	for _, p := range cfg.Adapters.Debrid {
-		domains = append(domains, debrid.New(p), debrid.NewUncached(p))
-	}
-	for _, b := range cfg.Adapters.Usenet {
-		domains = append(domains, usenet.New(b))
-	}
+	domains := domainsFromConfig(cfg)
 	participates := cfg.Hearsay.Participates()
 	if cfg.Hearsay.Publish && !participates {
 		return fmt.Errorf("hearsay.publish requires hearsay.participate: true")
@@ -189,4 +184,18 @@ func serve(configPath, listen string) (result error) {
 		return fmt.Errorf("http: %w", err)
 	}
 	return nil
+}
+
+func domainsFromConfig(cfg Config) []hearsay.Domain {
+	var domains []hearsay.Domain
+	for _, provider := range cfg.Adapters.Debrid {
+		domains = append(domains, debrid.New(provider), debrid.NewUncached(provider))
+	}
+	for _, backbone := range cfg.Adapters.Usenet {
+		domains = append(domains, usenet.New(backbone))
+	}
+	if cfg.Adapters.Torrent {
+		domains = append(domains, swarm.New())
+	}
+	return domains
 }

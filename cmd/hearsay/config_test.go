@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sirrobot01/hearsay/swarm"
 )
 
 func TestConfigDefaultsAreLocalAndInactive(t *testing.T) {
@@ -15,14 +17,14 @@ func TestConfigDefaultsAreLocalAndInactive(t *testing.T) {
 	if cfg.Hearsay.Participates() || cfg.Hearsay.Publish {
 		t.Fatalf("network enabled by default: %+v", cfg.Hearsay)
 	}
-	if len(cfg.Adapters.Debrid) != 0 || len(cfg.Adapters.Usenet) != 0 {
+	if len(cfg.Adapters.Debrid) != 0 || len(cfg.Adapters.Usenet) != 0 || cfg.Adapters.Torrent {
 		t.Fatalf("adapters enabled by default: %+v", cfg.Adapters)
 	}
 }
 
 func TestConfigRequiresExplicitParticipation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	raw := []byte("hearsay:\n  participate: true\n  publish: true\nadapters:\n  debrid: [realdebrid]\n")
+	raw := []byte("hearsay:\n  participate: true\n  publish: true\nadapters:\n  debrid: [realdebrid]\n  torrent: true\n")
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -30,8 +32,12 @@ func TestConfigRequiresExplicitParticipation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Hearsay.Participates() || !cfg.Hearsay.Publish || len(cfg.Adapters.Debrid) != 1 {
+	if !cfg.Hearsay.Participates() || !cfg.Hearsay.Publish || len(cfg.Adapters.Debrid) != 1 || !cfg.Adapters.Torrent {
 		t.Fatalf("config = %+v", cfg)
+	}
+	domains := domainsFromConfig(cfg)
+	if len(domains) != 3 || domains[2].Namespace() != swarm.Namespace {
+		t.Fatalf("domains = %v", domains)
 	}
 }
 

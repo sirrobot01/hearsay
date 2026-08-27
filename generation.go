@@ -32,7 +32,10 @@ type Generation struct {
 	Sig       [64]byte
 }
 
-const genMagic = "HSY2"
+// ProtocolVersion identifies the generation format advertised by the API.
+const ProtocolVersion = "HSY2"
+
+const genMagic = ProtocolVersion
 
 // maxSkew bounds how far ahead of local time a generation's BuiltAt may
 // be. BuiltAt is the publisher's own claim, and Decay grows without

@@ -19,11 +19,26 @@ const (
 	Enum
 )
 
+func (v ValueType) String() string {
+	switch v {
+	case Bool:
+		return "bool"
+	case Scalar:
+		return "scalar"
+	case Enum:
+		return "enum"
+	default:
+		return "unknown"
+	}
+}
+
 // Truth is ground truth revealed as a consequence of acting on a hint.
 type Truth struct {
 	Known bool
 	Value float64
 }
+
+const scalarAgreementTolerance = 0.15
 
 // FreshnessPolicy bounds evidence lifetime. Boolean observations are
 // grouped into Bucket intervals so their age survives Bloom encoding.

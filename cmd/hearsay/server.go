@@ -31,6 +31,7 @@ func (s *server) mux() http.Handler {
 	mux.HandleFunc("POST /v1/evidence", s.evidence)
 	mux.HandleFunc("POST /v1/observations", s.observations)
 	mux.HandleFunc("POST /v1/outcomes", s.outcomes)
+	mux.HandleFunc("GET /v1/namespaces", s.namespaces)
 	mux.HandleFunc("GET /v1/status", s.status)
 	return s.guard(mux)
 }
@@ -259,6 +260,30 @@ func (s *server) outcomes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) namespaces(w http.ResponseWriter, _ *http.Request) {
+	type capability struct {
+		Namespace         string `json:"namespace"`
+		ValueType         string `json:"value_type"`
+		FreshnessSeconds  int64  `json:"freshness_seconds"`
+		TimeBucketSeconds int64  `json:"time_bucket_seconds,omitzero"`
+	}
+	domains := s.h.Domains()
+	capabilities := make([]capability, 0, len(domains))
+	for _, domain := range domains {
+		freshness := domain.Freshness()
+		capabilities = append(capabilities, capability{
+			Namespace:         domain.Namespace(),
+			ValueType:         domain.ValueType().String(),
+			FreshnessSeconds:  int64(freshness.MaxAge.Seconds()),
+			TimeBucketSeconds: int64(freshness.Bucket.Seconds()),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"protocol":   hearsay.ProtocolVersion,
+		"namespaces": capabilities,
+	})
 }
 
 func (s *server) status(w http.ResponseWriter, r *http.Request) {

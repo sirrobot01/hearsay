@@ -2,6 +2,7 @@ package torznab
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -68,6 +69,9 @@ func TestRewrite(t *testing.T) {
 }
 
 func TestRewritePassThrough(t *testing.T) {
+	if got := Rewrite([]byte(fixture), nil); !bytes.Equal(got, []byte(fixture)) {
+		t.Fatal("nil lookup modified result")
+	}
 	noItems := `<?xml version="1.0"?><rss><channel><title>x</title></channel></rss>`
 	if got := Rewrite([]byte(noItems), nil); !bytes.Equal(got, []byte(noItems)) {
 		t.Fatal("empty result modified")
@@ -190,6 +194,31 @@ func TestProxyRewritesSearch(t *testing.T) {
 	}
 	if !strings.Contains(out, "hearsay_support") {
 		t.Error("attributes missing")
+	}
+}
+
+func TestProxyPassesRequestContextToLookup(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(fixture))
+	}))
+	defer upstream.Close()
+
+	type contextKey struct{}
+	p := &Proxy{
+		Upstream: upstream.URL,
+		ContextLookup: func(ctx context.Context, _ []string) (map[string]Claim, error) {
+			if ctx.Value(contextKey{}) != "request" {
+				t.Fatal("request context was not propagated")
+			}
+			return map[string]Claim{}, nil
+		},
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api?t=search", nil)
+	request = request.WithContext(context.WithValue(request.Context(), contextKey{}, "request"))
+	p.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
 	}
 }
 

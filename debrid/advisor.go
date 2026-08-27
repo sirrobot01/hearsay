@@ -50,6 +50,19 @@ func DefaultAdvicePolicy() AdvicePolicy {
 	return AdvicePolicy{MinSupport: 0.5, MinEvidence: 0.3, MinSources: 1}
 }
 
+// Accepts reports whether evidence may affect active host behavior.
+func (p AdvicePolicy) Accepts(answer hearsay.Answer) bool {
+	if !answer.Known {
+		return false
+	}
+	if answer.Local {
+		return true
+	}
+	return answer.Support >= p.MinSupport &&
+		answer.EvidenceWeight >= p.MinEvidence &&
+		answer.Sources >= p.MinSources
+}
+
 // AdvisorMetrics measures coverage and verified prediction quality locally.
 type AdvisorMetrics struct {
 	Evaluations              uint64 `json:"evaluations"`
@@ -160,7 +173,7 @@ func (a *Advisor) EvaluateBatch(subjects []string) ([]Decision, error) {
 			ID:       id,
 			Subject:  subject,
 			State:    paired.State,
-			UseHint:  a.mode == Active && a.accepts(evidence),
+			UseHint:  a.mode == Active && a.policy.Accepts(evidence),
 			Positive: paired.Positive,
 			Negative: paired.Negative,
 		})
@@ -185,18 +198,6 @@ func (a *Advisor) EvaluateBatch(subjects []string) ([]Decision, error) {
 	err := a.saveLocked()
 	a.mu.Unlock()
 	return decisions, err
-}
-
-func (a *Advisor) accepts(answer hearsay.Answer) bool {
-	if !answer.Known {
-		return false
-	}
-	if answer.Local {
-		return true
-	}
-	return answer.Support >= a.policy.MinSupport &&
-		answer.EvidenceWeight >= a.policy.MinEvidence &&
-		answer.Sources >= a.policy.MinSources
 }
 
 // RecordOutcome verifies a decision and reports the add result to both namespaces.

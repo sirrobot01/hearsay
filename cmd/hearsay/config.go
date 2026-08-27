@@ -26,8 +26,9 @@ type Config struct {
 	AllowedHosts []string      `yaml:"allowed_hosts"`
 	Hearsay      NetworkConfig `yaml:"hearsay"`
 	Adapters     struct {
-		Debrid []string `yaml:"debrid"`
-		Usenet []string `yaml:"usenet"`
+		Debrid  []string `yaml:"debrid"`
+		Usenet  []string `yaml:"usenet"`
+		Torrent bool     `yaml:"torrent"`
 	} `yaml:"adapters"`
 }
 

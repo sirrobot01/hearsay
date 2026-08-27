@@ -106,6 +106,25 @@ func TestAPI(t *testing.T) {
 	if status.Participation.Network || status.Metrics.Queries == 0 {
 		t.Fatalf("status = %+v", status)
 	}
+
+	res, err = do(t, ts, "GET", "/v1/namespaces", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var capabilities struct {
+		Protocol   string `json:"protocol"`
+		Namespaces []struct {
+			Namespace string `json:"namespace"`
+			ValueType string `json:"value_type"`
+		} `json:"namespaces"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.Protocol != hearsay.ProtocolVersion || len(capabilities.Namespaces) != 2 || capabilities.Namespaces[0].ValueType != "bool" {
+		t.Fatalf("capabilities = %+v", capabilities)
+	}
 }
 
 const testToken = "3d1f0c9a2b8e4756a1c0d3f28b7e6a459c2d81f0e3b5a7c964d2081f3a6b5c7e"

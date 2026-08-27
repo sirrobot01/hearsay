@@ -60,11 +60,14 @@ hearsay:
 adapters:
   debrid: [realdebrid] # activates cached and uncached namespaces
   usenet: []
+  torrent: false       # activates public-torrent availability
 ```
 
 `participate: true, publish: false` is reader/relay mode: your IP joins the selected public namespace topics, fetched generations are relayed, and your observations remain local. The legacy `enabled` key is still accepted as a participation opt-in, but `publish` must now be explicit.
 
 `hearsay status` shows the effective participation mode, active namespaces, query coverage, verified source accuracy, retry/quarantine counts, and bounded swarm storage. Engine counters persist locally across restarts.
+
+Built-in adapters are debrid cache/uncached evidence by provider, usenet completeness by backbone, and `torrent.public.availability` for terminal public-torrent completion ratios. The torrent adapter accepts only outcomes from real terminal attempts; never feed it live samples, cancellations, or probes.
 
 ## HTTP API
 
@@ -74,6 +77,7 @@ POST /v1/claims        {"ns": "...", "subjects": ["...", "..."]}   # batch; the 
 POST /v1/evidence      {"positive_ns": "...cached", "negative_ns": "...uncached", "subjects": ["..."]}
 POST /v1/observations  {"ns": "...", "observations": [{"subject": "...", "value": true}]}
 POST /v1/outcomes      {"ns": "...", "subject": "...", "outcome": false}
+GET  /v1/namespaces
 GET  /v1/status
 ```
 
@@ -118,6 +122,8 @@ h.Report("debrid.realdebrid.cached", infohash, wasInstant)     // the outcome co
 
 Add the `transport.Syncer` to participate in the network. See `cmd/hearsay` for the wiring.
 
+For daemon-backed hosts, use the typed [`client`](./client) package and the [integration guide](./docs/integration.md). Cross-implementation details are in the [HSY2 protocol specification](./docs/protocol.md).
+
 For a complete debrid loop, start an advisor in shadow mode, preserve normal ordering, and report the chosen add outcome:
 
 ```go
@@ -148,6 +154,7 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 
 - Hearsay publishes only what you observed through real work, never what you searched for. A failure is an observation too: an incomplete usenet download, or a torrent add that was not served from cache, publishes a claim — and that claim tells the network you attempted the subject. Disable `publish` to contribute nothing.
 - Bloom filters are testable, not enumerable. An adversary cannot list your subjects, but can test one they already hold.
+- Scalar generations expose derived subject keys, values, and observation times. The original subject is not present, but an adversary can test a candidate they already know. Usenet completeness and public-torrent availability use scalar payloads.
 - Each generation carries a fresh signing key. Your long-term identity signs that key, and the identity is in every generation. The identity is also the key that others follow you by. All of your generations therefore stay linkable to each other and to you. The fresh key does not prevent this. It only limits what a leaked signing key can forge.
 - DHT topics are public: participation puts your IP on a per-namespace list. Network participation defaults off; omit `participate` or set it to `false` to stay local-only.
 
