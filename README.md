@@ -54,6 +54,7 @@ hearsay:
   interval: "30m"      # publish and fetch cycle
   port: 0              # swarm listen port; 0 = random
   gossip_port: 0       # discovery listen port; 0 = random
+  max_storage_bytes: 1073741824 # cap relayed generation blobs at 1 GiB
   follow: []           # empty = discover on the DHT; non-empty = allowlist
 adapters:
   debrid: [realdebrid, alldebrid, torbox, premiumize]
@@ -90,10 +91,11 @@ Push observations from your own work. Report outcomes after you act on a hint: t
 ## Torznab proxy
 
 ```
-hearsay torznab --upstream http://prowlarr:9696
+hearsay torznab --upstream http://prowlarr:9696 \
+  --min-confidence 0.5 --min-sources 1 --max-age 24h
 ```
 
-Point your *arr at the proxy instead of the indexer. The proxy adds `hearsay_confidence` and `hearsay_cached` attributes to each release and moves claimed-cached releases to the top. On any failure, it returns the upstream result untouched.
+Point your *arr at the proxy instead of the indexer. The proxy adds `hearsay_confidence` and `hearsay_cached` attributes to each release and reorders evidence that passes the configured policy. Local observations always qualify. On any failure, it returns the upstream result untouched.
 
 The proxy is also a library, `github.com/sirrobot01/hearsay/torznab`. An application that embeds the engine can serve the same proxy from its own process, answered by an in-process `Lookup` instead of the daemon.
 

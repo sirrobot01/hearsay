@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -171,5 +173,31 @@ func TestPeerCountExcludesSelf(t *testing.T) {
 	// Gossip must still advertise self, or peers never learn this feed.
 	if got := n.Feeds("ns.x"); len(got) != 2 {
 		t.Errorf("gossip feeds = %v, want self and peer", got)
+	}
+}
+
+func TestPruneStorageKeepsNewestProtectedBlob(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.gen")
+	newPath := filepath.Join(dir, "new.gen")
+	if err := os.WriteFile(oldPath, []byte("12345"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("67890"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{dir: dir, maxStorage: 5}
+	if err := n.pruneStorage("new.gen"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old blob remains: %v", err)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("protected blob removed: %v", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const fixture = `<?xml version="1.0" encoding="UTF-8"?>
@@ -81,11 +82,7 @@ func TestRewritePassThrough(t *testing.T) {
 	}
 }
 
-// TestRewritePromotesSingleSource pins the case the daemon's 0.5
-// collapse got wrong: two equally fresh publishers, one of which
-// claims the release, scores just under the threshold. B trails A
-// upstream, so promoting it is observable.
-func TestRewritePromotesSingleSource(t *testing.T) {
+func TestRewriteDoesNotPromoteBelowThreshold(t *testing.T) {
 	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
 		return map[string]Claim{
 			"bbbb": {Subject: "bbbb", Confidence: 0.49, Sources: 1, Coverage: 1},
@@ -96,8 +93,35 @@ func TestRewritePromotesSingleSource(t *testing.T) {
 	}
 	bIdx := strings.Index(out, "Release.B")
 	aIdx := strings.Index(out, "Release.A")
+	if bIdx == -1 || aIdx == -1 || bIdx < aIdx {
+		t.Errorf("claim below threshold reordered: B=%d A=%d", bIdx, aIdx)
+	}
+}
+
+func TestRewriteUsesConfiguredPolicy(t *testing.T) {
+	out := string(RewriteWithPolicy([]byte(fixture), func([]string) (map[string]Claim, error) {
+		return map[string]Claim{
+			"bbbb": {Subject: "bbbb", Confidence: 0.49, Sources: 1, Coverage: 1},
+		}, nil
+	}, RankPolicy{MinConfidence: 0.4, MinSources: 1, MaxAge: time.Hour}))
+	bIdx := strings.Index(out, "Release.B")
+	aIdx := strings.Index(out, "Release.A")
 	if bIdx == -1 || aIdx == -1 || bIdx > aIdx {
-		t.Errorf("single-source claim not promoted: B=%d A=%d", bIdx, aIdx)
+		t.Errorf("configured claim not promoted: B=%d A=%d", bIdx, aIdx)
+	}
+}
+
+func TestRewriteDemotesLocalNegative(t *testing.T) {
+	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
+		return map[string]Claim{
+			"aaaa": {Subject: "aaaa", Value: new(false), Confidence: 1, Sources: 1, Local: true},
+		}, nil
+	}))
+	aIdx := strings.Index(out, "Release.A")
+	bIdx := strings.Index(out, "Release.B")
+	cIdx := strings.Index(out, "Release.C")
+	if aIdx == -1 || bIdx == -1 || cIdx == -1 || aIdx < bIdx || aIdx < cIdx {
+		t.Errorf("local negative not demoted: A=%d B=%d C=%d", aIdx, bIdx, cIdx)
 	}
 }
 

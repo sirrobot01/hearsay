@@ -112,7 +112,12 @@ func serve(configPath, listen string) error {
 				return err
 			}
 		}
-		node, err = transport.Listen(filepath.Join(cfg.Dir, "swarm"), cfg.Hearsay.Port, cfg.Hearsay.GossipPort)
+		node, err = transport.ListenWithConfig(transport.NodeConfig{
+			Dir:        filepath.Join(cfg.Dir, "swarm"),
+			Port:       cfg.Hearsay.Port,
+			GossipPort: cfg.Hearsay.GossipPort,
+			MaxStorage: cfg.Hearsay.MaxStorage,
+		})
 		if err != nil {
 			return err
 		}

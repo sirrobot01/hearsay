@@ -19,6 +19,7 @@ func torznabCmd() *cobra.Command {
 	client := &http.Client{Timeout: 2 * time.Minute}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	var listen, upstream, hearsayd, token, ns string
+	policy := torznab.DefaultRankPolicy()
 	cmd := &cobra.Command{
 		Use:   "torznab",
 		Short: "Run the annotating Torznab proxy between an *arr and its indexer",
@@ -28,6 +29,15 @@ func torznabCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			var err error
+			if policy.MinConfidence < 0 || policy.MinConfidence > 1 {
+				return fmt.Errorf("min confidence must be between 0 and 1")
+			}
+			if policy.MinSources < 1 {
+				return fmt.Errorf("min sources must be at least 1")
+			}
+			if policy.MaxAge <= 0 {
+				return fmt.Errorf("max age must be positive")
+			}
 			if token, err = clientToken(token); err != nil {
 				return err
 			}
@@ -37,6 +47,7 @@ func torznabCmd() *cobra.Command {
 				Upstream: upstream,
 				Client:   client,
 				Lookup:   daemonLookup(client, hearsayd, token, ns),
+				Policy:   policy,
 			}
 			return http.ListenAndServe(listen, p)
 		},
@@ -46,6 +57,9 @@ func torznabCmd() *cobra.Command {
 	cmd.Flags().StringVar(&hearsayd, "hearsayd", "http://127.0.0.1:8477", "hearsay daemon base URL")
 	cmd.Flags().StringVar(&token, "token", "", "daemon API token (default: read from the daemon's data directory, or $HEARSAY_TOKEN)")
 	cmd.Flags().StringVar(&ns, "ns", "debrid.realdebrid.cached", "namespace to query")
+	cmd.Flags().Float64Var(&policy.MinConfidence, "min-confidence", policy.MinConfidence, "minimum confidence required to reorder a release")
+	cmd.Flags().IntVar(&policy.MinSources, "min-sources", policy.MinSources, "minimum claiming sources required to reorder a release")
+	cmd.Flags().DurationVar(&policy.MaxAge, "max-age", policy.MaxAge, "oldest claim allowed to reorder a release")
 	cmd.MarkFlagRequired("upstream")
 	return cmd
 }

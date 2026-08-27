@@ -23,42 +23,76 @@ import (
 // /v1/claims response, so a daemon-backed Lookup can decode into it
 // directly.
 //
-// Denied marks positive evidence of absence: sources claimed the
-// subject in a paired denial namespace (added and found not cached).
-// A denied claim's Confidence and Sources describe the denial, and
-// Rewrite sinks it below every unclaimed release. Daemon answers
-// never set it; an engine-backed Lookup may, by pairing namespaces.
+// Denied marks positive evidence of absence from a paired namespace.
+// A local false Value is equivalent evidence from the daemon.
 type Claim struct {
 	Subject    string  `json:"subject"`
+	Value      *bool   `json:"value,omitempty"`
 	Confidence float64 `json:"confidence"`
 	Sources    int     `json:"sources"`
 	AgeSeconds int64   `json:"age_seconds"`
 	Coverage   float64 `json:"coverage"`
-	Denied     bool    `json:"denied,omitempty"`
+	Local      bool    `json:"local,omitzero"`
+	Denied     bool    `json:"denied,omitzero"`
 }
 
-// Cached reports whether any source positively claims the subject.
-// Bool payloads are bloom filters, so a hit is evidence and a miss is
-// only absence of evidence, never a denial: one source claiming a
-// release is the strongest signal that exists for it. The daemon's
-// own value field collapses confidence at 0.5, which discards that
-// signal whenever a namespace holds more publishers than happen to
-// agree — against two equally fresh feeds a lone claiming source
-// scores 0.49 and the release sinks. Confidence orders what promotes,
-// so thin claims still rank below corroborated ones.
+// Cached reports positive evidence without treating a Bloom miss as a denial.
 func (c Claim) Cached() bool {
+	if c.Denied {
+		return false
+	}
+	if c.Local && c.Value != nil {
+		return *c.Value
+	}
 	return c.Sources > 0 && !c.Denied
+}
+
+// Uncached reports explicit negative evidence, including local truth.
+func (c Claim) Uncached() bool {
+	return c.Denied || c.Local && c.Value != nil && !*c.Value
+}
+
+// RankPolicy controls which evidence may alter upstream order.
+type RankPolicy struct {
+	MinConfidence float64
+	MinSources    int
+	MaxAge        time.Duration
+}
+
+// DefaultRankPolicy accepts current evidence with majority support.
+func DefaultRankPolicy() RankPolicy {
+	return RankPolicy{
+		MinConfidence: 0.5,
+		MinSources:    1,
+		MaxAge:        24 * time.Hour,
+	}
+}
+
+// Accepts reports whether evidence is strong and recent enough to reorder.
+func (p RankPolicy) Accepts(c Claim) bool {
+	if c.Local && c.Value != nil {
+		return true
+	}
+	defaults := DefaultRankPolicy()
+	if p.MinConfidence == 0 {
+		p.MinConfidence = defaults.MinConfidence
+	}
+	if p.MinSources == 0 {
+		p.MinSources = defaults.MinSources
+	}
+	if p.MaxAge == 0 {
+		p.MaxAge = defaults.MaxAge
+	}
+	return c.Sources >= p.MinSources &&
+		c.Confidence >= p.MinConfidence &&
+		(p.MaxAge < 0 || time.Duration(c.AgeSeconds)*time.Second <= p.MaxAge)
 }
 
 // Lookup answers a batch of infohash subjects. Missing subjects mean
 // "unknown" and keep their upstream position.
 //
-// A Claim must carry positive evidence only: Sources counts sources
-// that claim the subject present, never ones that deny it. Network
-// answers satisfy this by construction. An engine-backed Lookup must
-// take care with local ground truth, which reports Sources: 1 for
-// both outcomes — map a local negative to Sources: 0, or the embedder
-// promotes releases it has itself proven uncached.
+// Remote Sources count positive claims. Denied and local false values
+// carry explicit negative evidence.
 type Lookup func(subjects []string) (map[string]Claim, error)
 
 // Proxy forwards every request to Upstream unchanged. On successful
@@ -75,6 +109,7 @@ type Proxy struct {
 	// Client issues upstream requests. Nil means a client with a
 	// 2-minute timeout.
 	Client *http.Client
+	Policy RankPolicy
 }
 
 var searchTypes = map[string]bool{
@@ -116,7 +151,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	out := Rewrite(body, p.Lookup)
+	out := RewriteWithPolicy(body, p.Lookup, p.Policy)
 	copyHeaders(w, res)
 	w.WriteHeader(res.StatusCode)
 	w.Write(out)
@@ -189,10 +224,14 @@ func splitItems(body []byte) []item {
 	return items
 }
 
-// Rewrite annotates each release with hearsay attributes and reorders
-// them: claimed-cached first by confidence, everything else in
-// upstream order. On any failure the body passes through untouched.
+// Rewrite annotates releases and reorders evidence accepted by the
+// default ranking policy. On failure the body passes through untouched.
 func Rewrite(body []byte, lookup Lookup) []byte {
+	return RewriteWithPolicy(body, lookup, DefaultRankPolicy())
+}
+
+// RewriteWithPolicy applies an explicit ranking policy.
+func RewriteWithPolicy(body []byte, lookup Lookup, policy RankPolicy) []byte {
 	items := splitItems(body)
 	if len(items) == 0 {
 		return body
@@ -217,12 +256,13 @@ func Rewrite(body []byte, lookup Lookup) []byte {
 		if !ok {
 			return -1
 		}
+		if !policy.Accepts(a) {
+			return -1
+		}
 		if a.Cached() {
 			return a.Confidence
 		}
-		// A denial sinks below every unclaimed release; the more
-		// confident the denial, the lower.
-		if a.Denied {
+		if a.Uncached() {
 			return -2 - a.Confidence
 		}
 		return -1
