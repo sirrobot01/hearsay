@@ -105,13 +105,30 @@ The proxy is also a library, `github.com/sirrobot01/hearsay/torznab`. An applica
 ## Embed the library
 
 ```go
-h, _ := hearsay.New(dir, debrid.New(debrid.RealDebrid))
+h, _ := hearsay.New(dir, debrid.New(debrid.RealDebrid), debrid.NewUncached(debrid.RealDebrid))
 h.Observe("debrid.realdebrid.cached", infohash, 1, time.Now()) // your work learned this
 a, _ := h.Query("debrid.realdebrid.cached", infohash)          // ask before you act
 h.Report("debrid.realdebrid.cached", infohash, wasInstant)     // the outcome corrects weights
 ```
 
 Add the `transport.Syncer` to participate in the network. See `cmd/hearsay` for the wiring.
+
+For a complete debrid loop, start an advisor in shadow mode, preserve normal ordering, and report the chosen add outcome:
+
+```go
+advisor, _ := debrid.NewAdvisor(h, debrid.RealDebrid, debrid.Shadow, metricsPath)
+decisions, _ := advisor.EvaluateBatch(infohashes)
+
+chosen := decisions[selected]
+advisor.RecordOutcome(chosen.ID, wasInstant)
+for i, decision := range decisions {
+    if i != selected {
+        advisor.Discard(decision.ID)
+    }
+}
+```
+
+Shadow mode measures coverage, verified accuracy, and potentially avoidable uncached additions without changing behavior. Active mode sets `Decision.UseHint` for known positive or negative evidence. Metrics remain local and persist when a metrics path is supplied.
 
 ## Add a domain
 
