@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -36,7 +37,25 @@ const MaxGenerationSize = 64 << 20
 // DefaultMaxStorage bounds generation blobs retained for relay.
 const DefaultMaxStorage = 1 << 30
 
-const dialCap = 8
+// DefaultMaxFeedsPerNamespace bounds publisher metadata retained per namespace.
+const DefaultMaxFeedsPerNamespace = 256
+
+const (
+	dialCap              = 8
+	discoveryMaxPeers    = 64
+	feedFailureLimit     = 3
+	feedRetryBase        = 5 * time.Minute
+	feedRetryMax         = 6 * time.Hour
+	feedQuarantinePeriod = 24 * time.Hour
+)
+
+type feedState struct {
+	lastSeen    time.Time
+	retryAt     time.Time
+	failures    uint8
+	pinned      bool
+	quarantined bool
+}
 
 type Node struct {
 	dir        string
@@ -44,19 +63,21 @@ type Node struct {
 	dhts       []*dht.Server
 	gossip     net.Listener
 	maxStorage int64
+	maxFeeds   int
 
 	mu        sync.Mutex
 	storageMu sync.Mutex
 	self      string
-	known     map[string]map[string]struct{}
+	known     map[string]map[string]*feedState
 	allow     map[string]struct{} // nil = accept any discovered key
 }
 
 type NodeConfig struct {
-	Dir        string
-	Port       int
-	GossipPort int
-	MaxStorage int64
+	Dir                  string
+	Port                 int
+	GossipPort           int
+	MaxStorage           int64
+	MaxFeedsPerNamespace int
 }
 
 // Listen starts the swarm client, its DHT servers, and the gossip
@@ -70,6 +91,9 @@ func Listen(dir string, port, gossipPort int) (*Node, error) {
 func ListenWithConfig(config NodeConfig) (*Node, error) {
 	if config.MaxStorage < 0 {
 		return nil, fmt.Errorf("transport: max storage must not be negative")
+	}
+	if config.MaxFeedsPerNamespace < 0 {
+		return nil, fmt.Errorf("transport: max feeds must not be negative")
 	}
 	if err := os.MkdirAll(config.Dir, 0o755); err != nil {
 		return nil, err
@@ -86,10 +110,14 @@ func ListenWithConfig(config NodeConfig) (*Node, error) {
 		dir:        config.Dir,
 		client:     client,
 		maxStorage: config.MaxStorage,
-		known:      map[string]map[string]struct{}{},
+		maxFeeds:   config.MaxFeedsPerNamespace,
+		known:      map[string]map[string]*feedState{},
 	}
 	if n.maxStorage == 0 {
 		n.maxStorage = DefaultMaxStorage
+	}
+	if n.maxFeeds == 0 {
+		n.maxFeeds = DefaultMaxFeedsPerNamespace
 	}
 	for _, s := range client.DhtServers() {
 		if w, ok := s.(torrent.AnacrolixDhtServerWrapper); ok {
@@ -120,8 +148,11 @@ func (n *Node) Close() error {
 func (n *Node) Track(ns string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.known == nil {
+		n.known = map[string]map[string]*feedState{}
+	}
 	if n.known[ns] == nil {
-		n.known[ns] = map[string]struct{}{}
+		n.known[ns] = map[string]*feedState{}
 	}
 }
 
@@ -132,7 +163,7 @@ func (n *Node) Announce(ns, self string) bool {
 	n.mu.Lock()
 	n.self = self
 	n.mu.Unlock()
-	return n.AddFeed(ns, self)
+	return n.PinFeed(ns, self)
 }
 
 // Allow restricts the node to a fixed set of publisher keys. Discovery
@@ -147,6 +178,12 @@ func (n *Node) Allow(pubHex ...string) {
 	for _, k := range pubHex {
 		n.allow[k] = struct{}{}
 	}
+	for _, feeds := range n.known {
+		maps.DeleteFunc(feeds, func(id string, _ *feedState) bool {
+			_, ok := n.allow[id]
+			return !ok
+		})
+	}
 }
 
 // AddFeed registers a publisher key for a namespace, from config or
@@ -154,23 +191,65 @@ func (n *Node) Allow(pubHex ...string) {
 // generations still verify cryptographically, and their weight is
 // earned through outcomes. An allowlist rejects everything outside it.
 func (n *Node) AddFeed(ns, pubHex string) bool {
+	now := time.Now()
+	return n.addFeedAt(ns, pubHex, false, now, now)
+}
+
+// AddRetainedFeed restores a candidate from a retained generation without
+// making an old generation look newly discovered.
+func (n *Node) AddRetainedFeed(ns, pubHex string, builtAt time.Time) bool {
+	return n.addFeedAt(ns, pubHex, false, builtAt, time.Now())
+}
+
+// PinFeed protects an explicitly followed or local feed from eviction.
+func (n *Node) PinFeed(ns, pubHex string) bool {
+	now := time.Now()
+	return n.addFeedAt(ns, pubHex, true, now, now)
+}
+
+func (n *Node) addFeedAt(ns, pubHex string, pinned bool, seenAt, now time.Time) bool {
 	if raw, err := hex.DecodeString(pubHex); err != nil || len(raw) != 32 {
 		return false
 	}
+	if seenAt.After(now) {
+		seenAt = now
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.known == nil {
+		n.known = map[string]map[string]*feedState{}
+	}
 	if n.allow != nil {
 		if _, ok := n.allow[pubHex]; !ok {
 			return false
 		}
 	}
 	if n.known[ns] == nil {
-		n.known[ns] = map[string]struct{}{}
+		n.known[ns] = map[string]*feedState{}
 	}
-	if _, ok := n.known[ns][pubHex]; ok {
+	if state := n.known[ns][pubHex]; state != nil {
+		state.pinned = state.pinned || pinned
+		if state.quarantined {
+			if now.Before(state.retryAt) && !pinned {
+				return false
+			}
+			state.quarantined = false
+			state.failures = 0
+			state.retryAt = time.Time{}
+		}
+		if seenAt.After(state.lastSeen) {
+			state.lastSeen = seenAt
+		}
 		return false
 	}
-	n.known[ns][pubHex] = struct{}{}
+	if len(n.known[ns]) >= n.maxFeedsLocked() {
+		candidate := n.evictableFeedLocked(ns)
+		if candidate == "" {
+			return false
+		}
+		delete(n.known[ns], candidate)
+	}
+	n.known[ns][pubHex] = &feedState{lastSeen: seenAt, pinned: pinned}
 	return true
 }
 
@@ -178,11 +257,108 @@ func (n *Node) AddFeed(ns, pubHex string) bool {
 func (n *Node) Feeds(ns string) []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	ids := make([]string, 0, len(n.known[ns]))
-	for id := range n.known[ns] {
-		ids = append(ids, id)
-	}
+	ids := slices.Collect(maps.Keys(n.known[ns]))
+	ids = slices.DeleteFunc(ids, func(id string) bool { return n.known[ns][id].quarantined })
+	slices.Sort(ids)
 	return ids
+}
+
+// ReadyFeeds lists candidates whose retry delay has elapsed.
+func (n *Node) ReadyFeeds(ns string) []string {
+	return n.readyFeedsAt(ns, time.Now())
+}
+
+func (n *Node) readyFeedsAt(ns string, now time.Time) []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	ids := slices.Collect(maps.Keys(n.known[ns]))
+	ids = slices.DeleteFunc(ids, func(id string) bool {
+		state := n.known[ns][id]
+		return state.quarantined || now.Before(state.retryAt)
+	})
+	slices.Sort(ids)
+	return ids
+}
+
+// RecordPull applies retry backoff and quarantines repeatedly failing feeds.
+func (n *Node) RecordPull(ns, feed string, success bool) {
+	n.recordPullAt(ns, feed, success, time.Now())
+}
+
+func (n *Node) recordPullAt(ns, feed string, success bool, now time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	state := n.known[ns][feed]
+	if state == nil {
+		return
+	}
+	if success {
+		state.failures = 0
+		state.retryAt = time.Time{}
+		state.quarantined = false
+		state.lastSeen = now
+		return
+	}
+	if state.failures < 31 {
+		state.failures++
+	}
+	if state.failures >= feedFailureLimit && !state.pinned {
+		state.quarantined = true
+		state.retryAt = now.Add(feedQuarantinePeriod)
+		return
+	}
+	shift := min(state.failures-1, uint8(6))
+	delay := feedRetryBase << shift
+	state.retryAt = now.Add(min(delay, feedRetryMax))
+}
+
+// PruneFeeds removes expired candidate metadata and completed quarantines.
+func (n *Node) PruneFeeds(ns string, before time.Time) {
+	n.pruneFeedsAt(ns, before, time.Now())
+}
+
+func (n *Node) pruneFeedsAt(ns string, before, now time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for id, state := range n.known[ns] {
+		if state.pinned {
+			continue
+		}
+		if state.lastSeen.Before(before) || state.quarantined && !now.Before(state.retryAt) {
+			delete(n.known[ns], id)
+		}
+	}
+}
+
+func (n *Node) maxFeedsLocked() int {
+	if n.maxFeeds > 0 {
+		return n.maxFeeds
+	}
+	return DefaultMaxFeedsPerNamespace
+}
+
+func (n *Node) evictableFeedLocked(ns string) string {
+	var candidate string
+	for id, state := range n.known[ns] {
+		if state.pinned || id == n.self {
+			continue
+		}
+		if candidate == "" {
+			candidate = id
+			continue
+		}
+		current := n.known[ns][candidate]
+		if state.quarantined != current.quarantined {
+			if state.quarantined {
+				candidate = id
+			}
+			continue
+		}
+		if state.failures > current.failures || state.failures == current.failures && state.lastSeen.Before(current.lastSeen) {
+			candidate = id
+		}
+	}
+	return candidate
 }
 
 // TorrentStat describes one generation blob this node serves or is
@@ -196,16 +372,26 @@ type TorrentStat struct {
 
 // Stats is a point-in-time view of network participation.
 type Stats struct {
-	SwarmPort   int            `json:"swarm_port"`
-	GossipPort  int            `json:"gossip_port"`
-	StoredBytes int64          `json:"stored_bytes"`
-	MaxStorage  int64          `json:"max_storage_bytes"`
-	Torrents    []TorrentStat  `json:"torrents"`
-	Feeds       map[string]int `json:"feeds"`
+	SwarmPort            int            `json:"swarm_port"`
+	GossipPort           int            `json:"gossip_port"`
+	StoredBytes          int64          `json:"stored_bytes"`
+	MaxStorage           int64          `json:"max_storage_bytes"`
+	MaxFeedsPerNamespace int            `json:"max_feeds_per_namespace"`
+	Torrents             []TorrentStat  `json:"torrents"`
+	Feeds                map[string]int `json:"feeds"`
+	RetryingFeeds        map[string]int `json:"retrying_feeds"`
+	QuarantinedFeeds     map[string]int `json:"quarantined_feeds"`
 }
 
 func (n *Node) Stats() Stats {
-	s := Stats{SwarmPort: n.client.LocalPort(), MaxStorage: n.maxStorage, Feeds: map[string]int{}}
+	s := Stats{
+		SwarmPort:            n.client.LocalPort(),
+		MaxStorage:           n.maxStorage,
+		MaxFeedsPerNamespace: n.maxFeeds,
+		Feeds:                map[string]int{},
+		RetryingFeeds:        map[string]int{},
+		QuarantinedFeeds:     map[string]int{},
+	}
 	if a, ok := n.gossip.Addr().(*net.TCPAddr); ok {
 		s.GossipPort = a.Port
 	}
@@ -222,8 +408,16 @@ func (n *Node) Stats() Stats {
 	}
 	s.StoredBytes = n.storageUsage()
 	n.mu.Lock()
-	for ns := range n.known {
+	now := time.Now()
+	for ns, feeds := range n.known {
 		s.Feeds[ns] = n.peersLocked(ns)
+		for _, state := range feeds {
+			if state.quarantined {
+				s.QuarantinedFeeds[ns]++
+			} else if now.Before(state.retryAt) {
+				s.RetryingFeeds[ns]++
+			}
+		}
 	}
 	n.mu.Unlock()
 	return s
@@ -234,9 +428,11 @@ func (n *Node) Stats() Stats {
 // spread, but sync never pulls from it, so reporting it as a peer
 // overstates the network by one in every namespace. Caller holds n.mu.
 func (n *Node) peersLocked(ns string) int {
-	c := len(n.known[ns])
-	if _, ok := n.known[ns][n.self]; ok && n.self != "" {
-		c--
+	c := 0
+	for id, state := range n.known[ns] {
+		if id != n.self && !state.quarantined {
+			c++
+		}
 	}
 	return c
 }
@@ -447,7 +643,7 @@ func (n *Node) Discover(ctx context.Context, ns string) {
 				}
 				for _, peer := range pv.Peers {
 					addr := net.JoinHostPort(peer.IP.String(), strconv.Itoa(peer.Port))
-					if _, dup := seen[addr]; dup || peer.Port == 0 {
+					if _, dup := seen[addr]; dup || peer.Port == 0 || len(seen) >= discoveryMaxPeers {
 						continue
 					}
 					seen[addr] = struct{}{}
@@ -511,10 +707,13 @@ func (n *Node) exchange(ctx context.Context, addr string) {
 func (n *Node) talk(conn net.Conn) {
 	n.mu.Lock()
 	msg := gossipMsg{V: gossipVersion, Feeds: make(map[string][]string, len(n.known))}
-	for ns, feeds := range n.known {
-		for id := range feeds {
-			msg.Feeds[ns] = append(msg.Feeds[ns], id)
-		}
+	namespaces := slices.Sorted(maps.Keys(n.known))
+	for _, ns := range namespaces[:min(len(namespaces), gossipMaxNamespaces)] {
+		feeds := n.known[ns]
+		ids := slices.Collect(maps.Keys(feeds))
+		ids = slices.DeleteFunc(ids, func(id string) bool { return feeds[id].quarantined })
+		slices.Sort(ids)
+		msg.Feeds[ns] = ids[:min(len(ids), gossipMaxFeeds)]
 	}
 	n.mu.Unlock()
 	sent := make(chan struct{})

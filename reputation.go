@@ -4,24 +4,49 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"sync"
 )
 
-// reputation is the local, private trust ledger. Weights are derived
-// exclusively from verified outcomes of acting on hints: no global
-// reputation, no imported scores. New sources start at 0.5 and move by
-// EWMA toward their observed accuracy.
+const (
+	probationWeight      = 0.05
+	unverifiedPoolWeight = 0.25
+	wilsonZ              = 1.645
+	legacySamples        = 10
+)
+
+type sourceReputation struct {
+	Successes uint64 `json:"successes"`
+	Failures  uint64 `json:"failures"`
+}
+
+func (s sourceReputation) samples() uint64 {
+	return s.Successes + s.Failures
+}
+
+func (s sourceReputation) weight() float64 {
+	n := s.samples()
+	if n == 0 {
+		return probationWeight
+	}
+	observations := float64(n)
+	accuracy := float64(s.Successes) / observations
+	zSquared := wilsonZ * wilsonZ
+	center := accuracy + zSquared/(2*observations)
+	margin := wilsonZ * math.Sqrt((accuracy*(1-accuracy)+zSquared/(4*observations))/observations)
+	lower := (center - margin) / (1 + zSquared/observations)
+	return max(lower, 0.005)
+}
+
 type reputation struct {
 	mu   sync.Mutex
 	path string
-	w    map[string]float64
+	byID map[string]sourceReputation
 }
 
-const repAlpha = 0.2
-
 func openReputation(path string) (*reputation, error) {
-	r := &reputation{path: path, w: map[string]float64{}}
+	r := &reputation{path: path, byID: map[string]sourceReputation{}}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return r, nil
@@ -29,8 +54,22 @@ func openReputation(path string) (*reputation, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(raw, &r.w); err != nil {
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
 		return nil, err
+	}
+	for id, encoded := range entries {
+		var source sourceReputation
+		if err := json.Unmarshal(encoded, &source); err == nil {
+			r.byID[id] = source
+			continue
+		}
+		var legacy float64
+		if err := json.Unmarshal(encoded, &legacy); err != nil {
+			return nil, err
+		}
+		successes := uint64(math.Round(min(max(legacy, 0), 1) * legacySamples))
+		r.byID[id] = sourceReputation{Successes: successes, Failures: legacySamples - successes}
 	}
 	return r, nil
 }
@@ -38,25 +77,59 @@ func openReputation(path string) (*reputation, error) {
 func (r *reputation) weight(feed string) float64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if w, ok := r.w[feed]; ok {
-		return w
+	return r.byID[feed].weight()
+}
+
+func (r *reputation) weights(feeds []string) map[string]float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	weights := make(map[string]float64, len(feeds))
+	var probationTotal float64
+	for _, feed := range feeds {
+		source := r.byID[feed]
+		weight := source.weight()
+		weights[feed] = weight
+		if source.samples() == 0 {
+			probationTotal += weight
+		}
 	}
-	return 0.5
+	if probationTotal <= unverifiedPoolWeight {
+		return weights
+	}
+	scale := unverifiedPoolWeight / probationTotal
+	for _, feed := range feeds {
+		if r.byID[feed].samples() == 0 {
+			weights[feed] *= scale
+		}
+	}
+	return weights
 }
 
 func (r *reputation) record(feed string, agree bool) error {
+	return r.recordMany(map[string]bool{feed: agree})
+}
+
+func (r *reputation) recordMany(outcomes map[string]bool) error {
+	if len(outcomes) == 0 {
+		return nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	w, ok := r.w[feed]
-	if !ok {
-		w = 0.5
+	for feed, agree := range outcomes {
+		source := r.byID[feed]
+		if agree {
+			source.Successes++
+		} else {
+			source.Failures++
+		}
+		r.byID[feed] = source
 	}
-	outcome := 0.0
-	if agree {
-		outcome = 1
-	}
-	r.w[feed] = (1-repAlpha)*w + repAlpha*outcome
-	raw, err := json.MarshalIndent(r.w, "", "  ")
+	return r.saveLocked()
+}
+
+func (r *reputation) saveLocked() error {
+	raw, err := json.MarshalIndent(r.byID, "", "  ")
 	if err != nil {
 		return err
 	}

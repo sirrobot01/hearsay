@@ -22,9 +22,16 @@ import (
 // is implicit.
 const Retention = 8
 
+// MaxRetainedFeedsPerNamespace bounds remote feed data held by the engine.
+const MaxRetainedFeedsPerNamespace = 256
+
 const truthRecLen = 48
 
+// ErrStale means a feed already has the same or a newer sequence.
 var ErrStale = errors.New("hearsay: generation not newer than retained")
+
+// ErrFeedCapacity means a generation did not survive bounded feed retention.
+var ErrFeedCapacity = errors.New("hearsay: generation displaced by newer feeds")
 
 // Observation is a locally observed ground truth value.
 type Observation struct {
@@ -266,7 +273,7 @@ func (s *store) pruneTruth(ns string, cutoff time.Time) (bool, error) {
 	return true, nil
 }
 
-func (s *store) addGeneration(g *Generation) error {
+func (s *store) addGeneration(g *Generation, self string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	byFeed := s.feeds[g.Namespace]
@@ -295,6 +302,51 @@ func (s *store) addGeneration(g *Generation) error {
 		gens = gens[1:]
 	}
 	byFeed[g.FeedID()] = gens
+	if err := s.limitFeedsLocked(g.Namespace, self, MaxRetainedFeedsPerNamespace); err != nil {
+		return err
+	}
+	if byFeed[g.FeedID()] == nil {
+		return ErrFeedCapacity
+	}
+	return nil
+}
+
+func (s *store) limitFeeds(ns, self string, limit int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.limitFeedsLocked(ns, self, limit)
+}
+
+func (s *store) limitFeedsLocked(ns, self string, limit int) error {
+	remoteCount := len(s.feeds[ns])
+	if s.feeds[ns][self] != nil {
+		remoteCount--
+	}
+	for remoteCount > limit {
+		var candidate string
+		for feed, generations := range s.feeds[ns] {
+			if feed == self || len(generations) == 0 {
+				continue
+			}
+			if candidate == "" {
+				candidate = feed
+				continue
+			}
+			candidateBuiltAt := s.feeds[ns][candidate][len(s.feeds[ns][candidate])-1].BuiltAt
+			builtAt := generations[len(generations)-1].BuiltAt
+			if builtAt.Before(candidateBuiltAt) || builtAt.Equal(candidateBuiltAt) && feed < candidate {
+				candidate = feed
+			}
+		}
+		if candidate == "" {
+			return nil
+		}
+		if err := os.RemoveAll(filepath.Join(s.dir, "feeds", candidate, ns)); err != nil {
+			return err
+		}
+		delete(s.feeds[ns], candidate)
+		remoteCount--
+	}
 	return nil
 }
 
@@ -306,6 +358,24 @@ func (s *store) forget(ns, feed string) error {
 	}
 	delete(s.feeds[ns], feed)
 	return os.RemoveAll(filepath.Join(s.dir, "feeds", feed, ns))
+}
+
+func (s *store) pruneFeedsBefore(ns, self string, cutoff time.Time) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var removed []string
+	for feed, generations := range s.feeds[ns] {
+		if feed == self || len(generations) == 0 || !generations[len(generations)-1].BuiltAt.Before(cutoff) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(s.dir, "feeds", feed, ns)); err != nil {
+			return removed, err
+		}
+		delete(s.feeds[ns], feed)
+		removed = append(removed, feed)
+	}
+	slices.Sort(removed)
+	return removed, nil
 }
 
 func (s *store) close() error {

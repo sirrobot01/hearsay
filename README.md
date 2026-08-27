@@ -55,6 +55,7 @@ hearsay:
   port: 0              # swarm listen port; 0 = random
   gossip_port: 0       # discovery listen port; 0 = random
   max_storage_bytes: 1073741824 # cap relayed generation blobs at 1 GiB
+  max_feeds_per_namespace: 256  # bound discovered publisher metadata
   follow: []           # empty = discover on the DHT; non-empty = allowlist
 adapters:
   debrid: [realdebrid, alldebrid, torbox, premiumize]
@@ -95,7 +96,7 @@ Push observations from your own work. Report outcomes after you act on a hint: t
 
 ```
 hearsay torznab --upstream http://prowlarr:9696 \
-  --min-support 0.5 --min-sources 1 --max-age 24h
+  --min-support 0.5 --min-evidence 0.3 --min-sources 1 --max-age 24h
 ```
 
 Point your *arr at the proxy instead of the indexer. The proxy adds `hearsay_state`, `hearsay_support`, `hearsay_evidence_weight`, and—when known—`hearsay_cached` attributes. It reorders evidence that passes the configured policy. Fresh local observations always qualify. On any failure, it returns the upstream result untouched.
@@ -152,6 +153,7 @@ Implement the `Domain` interface. A domain must satisfy all four criteria:
 - Bloom payloads carry positive claims only, so a debrid denial travels as a positive claim in the paired namespace `debrid.<vendor>.uncached`: membership means "added and found not cached". Denials decay with a 6 hour half-life — anyone's uncached download can flip the state — where cached claims get 24 hours.
 - `HSY2` generations are immutable and signed. Boolean namespaces use time-bucketed Bloom filters; scalar records carry their observation time. Domain freshness policies expire local and remote evidence without refreshing old claims when a generation is rebuilt.
 - Consumers keep the last 8 generations per feed for delivery resilience. Claim age comes from the payload, not the generation timestamp.
+- New publishers begin on probation. Their combined unverified influence is capped at 0.25 per namespace; verified outcomes raise or lower a source using a conservative confidence bound. Active integrations require at least 0.3 absolute evidence by default.
 - Pointers to the latest generation are BEP 44 mutable items under a versioned identity-and-namespace key. To follow a publisher, you need only their public key. Payloads travel as torrents.
-- Discovery uses one v2 DHT topic per namespace, `SHA1("hearsay:v2:" + namespace)`, plus a versioned gossip handshake that exchanges publisher keys.
+- Discovery uses one v2 DHT topic per namespace, `SHA1("hearsay:v2:" + namespace)`, plus a versioned gossip handshake that exchanges publisher keys. Feed metadata and retained feed data are bounded per namespace; failed pulls back off, repeatedly failing feeds enter quarantine, and stale generations are evicted.
 - `follow` is an allowlist. If you list publishers, the daemon uses only those keys. It does not announce on the DHT topic, it ignores keys from gossip, and it discards feeds that an earlier run discovered.

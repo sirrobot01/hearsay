@@ -128,3 +128,43 @@ func TestAdvisorMeasuresAvoidableFailureInShadowMode(t *testing.T) {
 		t.Fatalf("metrics = %+v", metrics)
 	}
 }
+
+type fixedEvidence struct {
+	answer hearsay.Answer
+}
+
+func (f fixedEvidence) QueryPair(string, string, any) (hearsay.PairedAnswer, error) {
+	return hearsay.PairedAnswer{State: hearsay.EvidencePositive, Positive: f.answer}, nil
+}
+
+func (fixedEvidence) Report(string, any, any) error { return nil }
+
+func TestAdvisorRejectsProbationaryEvidence(t *testing.T) {
+	engine := fixedEvidence{answer: hearsay.Answer{
+		Known: true, Support: 1, EvidenceWeight: 0.25, Sources: 10,
+	}}
+	advisor, err := NewAdvisor(engine, RealDebrid, Active, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := advisor.Evaluate(advisorSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.UseHint {
+		t.Fatal("probationary evidence affected active behavior")
+	}
+
+	engine.answer.Local = true
+	local, err := NewAdvisor(engine, RealDebrid, Active, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err = local.Evaluate(advisorSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.UseHint {
+		t.Fatal("local evidence did not affect active behavior")
+	}
+}

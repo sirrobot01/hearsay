@@ -67,17 +67,19 @@ func (c Claim) State() string {
 
 // RankPolicy controls which evidence may alter upstream order.
 type RankPolicy struct {
-	MinSupport float64
-	MinSources int
-	MaxAge     time.Duration
+	MinSupport  float64
+	MinEvidence float64
+	MinSources  int
+	MaxAge      time.Duration
 }
 
 // DefaultRankPolicy accepts current evidence with majority support.
 func DefaultRankPolicy() RankPolicy {
 	return RankPolicy{
-		MinSupport: 0.5,
-		MinSources: 1,
-		MaxAge:     24 * time.Hour,
+		MinSupport:  0.5,
+		MinEvidence: 0.3,
+		MinSources:  1,
+		MaxAge:      24 * time.Hour,
 	}
 }
 
@@ -99,6 +101,7 @@ func (p RankPolicy) Accepts(c Claim) bool {
 	}
 	return c.Sources >= p.MinSources &&
 		c.Support >= p.MinSupport &&
+		c.EvidenceWeight >= p.MinEvidence &&
 		(p.MaxAge < 0 || time.Duration(c.AgeSeconds)*time.Second <= p.MaxAge)
 }
 

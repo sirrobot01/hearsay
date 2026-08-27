@@ -89,6 +89,9 @@ func New(dir string, domains ...Domain) (*Hearsay, error) {
 		h.domains[ns] = d
 	}
 	for ns, domain := range h.domains {
+		if err := st.limitFeeds(ns, h.self, MaxRetainedFeedsPerNamespace); err != nil {
+			return nil, err
+		}
 		pruned, err := st.pruneTruth(ns, time.Now().Add(-domain.Freshness().MaxAge))
 		if err != nil {
 			return nil, err
@@ -206,9 +209,9 @@ func (h *Hearsay) Report(ns string, subject any, outcome any) error {
 	if err != nil {
 		return err
 	}
-	var errs error
 	now := time.Now()
 	policy := d.Freshness()
+	outcomes := map[string]bool{}
 	h.store.mu.RLock()
 	for feed, gens := range h.store.feeds[ns] {
 		if feed == h.self {
@@ -223,10 +226,10 @@ func (h *Hearsay) Report(ns string, subject any, outcome any) error {
 		if d.ValueType() == Bool {
 			agree = (v >= 0.5) == (truth.Value >= 0.5)
 		}
-		errs = errors.Join(errs, h.rep.record(feed, agree))
+		outcomes[feed] = agree
 	}
 	h.store.mu.RUnlock()
-	return errors.Join(errs, h.Observe(ns, subject, truth.Value, now))
+	return errors.Join(h.rep.recordMany(outcomes), h.Observe(ns, subject, truth.Value, now))
 }
 
 // Publish builds a fresh generation from current local ground truth.
@@ -273,7 +276,7 @@ func (h *Hearsay) Publish(ns string) (*Generation, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := h.store.addGeneration(g); err != nil {
+	if err := h.store.addGeneration(g, h.self); err != nil {
 		return nil, err
 	}
 	h.mu.Lock()
@@ -303,7 +306,7 @@ func (h *Hearsay) Ingest(raw []byte) (*Generation, error) {
 	if g.FeedID() == h.self {
 		return nil, errors.New("hearsay: refusing to ingest own feed")
 	}
-	if err := h.store.addGeneration(g); err != nil {
+	if err := h.store.addGeneration(g, h.self); err != nil {
 		return nil, err
 	}
 	return g, nil
@@ -338,6 +341,14 @@ func (h *Hearsay) Feeds(ns string) []string {
 // whether or not the feed is still followed.
 func (h *Hearsay) Forget(ns, feed string) error {
 	return h.store.forget(ns, feed)
+}
+
+// PruneFeedsBefore drops remote feeds whose newest generation predates cutoff.
+func (h *Hearsay) PruneFeedsBefore(ns string, cutoff time.Time) ([]string, error) {
+	if _, ok := h.domains[ns]; !ok {
+		return nil, fmt.Errorf("hearsay: unknown namespace %q", ns)
+	}
+	return h.store.pruneFeedsBefore(ns, h.self, cutoff)
 }
 
 func (h *Hearsay) Close() error {

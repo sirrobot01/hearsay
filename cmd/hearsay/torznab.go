@@ -32,6 +32,9 @@ func torznabCmd() *cobra.Command {
 			if policy.MinSupport < 0 || policy.MinSupport > 1 {
 				return fmt.Errorf("min support must be between 0 and 1")
 			}
+			if policy.MinEvidence < 0 {
+				return fmt.Errorf("min evidence must not be negative")
+			}
 			if policy.MinSources < 1 {
 				return fmt.Errorf("min sources must be at least 1")
 			}
@@ -59,6 +62,7 @@ func torznabCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ns, "ns", "debrid.realdebrid.cached", "namespace to query")
 	cmd.Flags().StringVar(&denialNS, "denial-ns", "debrid.realdebrid.uncached", "complementary denial namespace")
 	cmd.Flags().Float64Var(&policy.MinSupport, "min-support", policy.MinSupport, "minimum support required to reorder a release")
+	cmd.Flags().Float64Var(&policy.MinEvidence, "min-evidence", policy.MinEvidence, "minimum absolute evidence weight required to reorder a release")
 	cmd.Flags().IntVar(&policy.MinSources, "min-sources", policy.MinSources, "minimum claiming sources required to reorder a release")
 	cmd.Flags().DurationVar(&policy.MaxAge, "max-age", policy.MaxAge, "oldest claim allowed to reorder a release")
 	cmd.MarkFlagRequired("upstream")

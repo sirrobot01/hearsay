@@ -38,6 +38,18 @@ type Decision struct {
 	Negative hearsay.Answer
 }
 
+// AdvicePolicy controls which remote evidence can affect host behavior.
+type AdvicePolicy struct {
+	MinSupport  float64
+	MinEvidence float64
+	MinSources  int
+}
+
+// DefaultAdvicePolicy rejects evidence that fits inside the unverified pool.
+func DefaultAdvicePolicy() AdvicePolicy {
+	return AdvicePolicy{MinSupport: 0.5, MinEvidence: 0.3, MinSources: 1}
+}
+
 // AdvisorMetrics measures coverage and verified prediction quality locally.
 type AdvisorMetrics struct {
 	Evaluations              uint64 `json:"evaluations"`
@@ -77,6 +89,7 @@ type Advisor struct {
 	positiveNS string
 	negativeNS string
 	mode       AdviceMode
+	policy     AdvicePolicy
 	path       string
 
 	mu      sync.Mutex
@@ -86,6 +99,11 @@ type Advisor struct {
 
 // NewAdvisor creates a provider-specific advisor. An empty metrics path is in-memory only.
 func NewAdvisor(engine EvidenceEngine, provider string, mode AdviceMode, metricsPath string) (*Advisor, error) {
+	return NewAdvisorWithPolicy(engine, provider, mode, DefaultAdvicePolicy(), metricsPath)
+}
+
+// NewAdvisorWithPolicy creates an advisor with explicit activation thresholds.
+func NewAdvisorWithPolicy(engine EvidenceEngine, provider string, mode AdviceMode, policy AdvicePolicy, metricsPath string) (*Advisor, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("debrid: advisor engine is required")
 	}
@@ -95,11 +113,15 @@ func NewAdvisor(engine EvidenceEngine, provider string, mode AdviceMode, metrics
 	if !validProvider(provider) {
 		return nil, fmt.Errorf("debrid: invalid provider %q", provider)
 	}
+	if policy.MinSupport < 0 || policy.MinSupport > 1 || policy.MinEvidence < 0 || policy.MinSources < 1 {
+		return nil, fmt.Errorf("debrid: invalid advice policy")
+	}
 	advisor := &Advisor{
 		engine:     engine,
 		positiveNS: New(provider).Namespace(),
 		negativeNS: NewUncached(provider).Namespace(),
 		mode:       mode,
+		policy:     policy,
 		path:       metricsPath,
 		pending:    map[string]Decision{},
 	}
@@ -130,11 +152,15 @@ func (a *Advisor) EvaluateBatch(subjects []string) ([]Decision, error) {
 		if err != nil {
 			return nil, err
 		}
+		evidence := paired.Positive
+		if paired.State == hearsay.EvidenceNegative {
+			evidence = paired.Negative
+		}
 		decisions = append(decisions, Decision{
 			ID:       id,
 			Subject:  subject,
 			State:    paired.State,
-			UseHint:  a.mode == Active && paired.State != hearsay.EvidenceUnknown,
+			UseHint:  a.mode == Active && a.accepts(evidence),
 			Positive: paired.Positive,
 			Negative: paired.Negative,
 		})
@@ -159,6 +185,18 @@ func (a *Advisor) EvaluateBatch(subjects []string) ([]Decision, error) {
 	err := a.saveLocked()
 	a.mu.Unlock()
 	return decisions, err
+}
+
+func (a *Advisor) accepts(answer hearsay.Answer) bool {
+	if !answer.Known {
+		return false
+	}
+	if answer.Local {
+		return true
+	}
+	return answer.Support >= a.policy.MinSupport &&
+		answer.EvidenceWeight >= a.policy.MinEvidence &&
+		answer.Sources >= a.policy.MinSources
 }
 
 // RecordOutcome verifies a decision and reports the add result to both namespaces.

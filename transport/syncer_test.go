@@ -65,7 +65,7 @@ func TestSyncCoversEveryNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer gossip.Close()
-	n := &Node{known: map[string]map[string]struct{}{}, gossip: gossip}
+	n := &Node{known: map[string]map[string]*feedState{}, gossip: gossip}
 	for _, ns := range nss {
 		n.Track(ns)
 	}
@@ -75,7 +75,7 @@ func TestSyncCoversEveryNamespace(t *testing.T) {
 		Node:   n,
 		Log:    slog.New(slog.DiscardHandler),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	s.sync(ctx)
 
@@ -108,11 +108,11 @@ func TestSyncStopsOnCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer gossip.Close()
-	n := &Node{known: map[string]map[string]struct{}{}, gossip: gossip}
+	n := &Node{known: map[string]map[string]*feedState{}, gossip: gossip}
 	n.Track(d.Namespace())
 
 	s := &Syncer{Engine: engine, Node: n, Log: slog.New(slog.DiscardHandler)}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	done := make(chan struct{})

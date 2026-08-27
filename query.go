@@ -2,6 +2,8 @@ package hearsay
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 )
 
@@ -52,11 +54,14 @@ func (h *Hearsay) Query(ns string, subject any) (Answer, error) {
 	var score, total, valueSum float64
 	var covering, hits int
 	minAge := time.Duration(-1)
+	feedIDs := slices.Collect(maps.Keys(h.store.feeds[ns]))
+	feedIDs = slices.DeleteFunc(feedIDs, func(feed string) bool { return feed == h.self })
+	weights := h.rep.weights(feedIDs)
 	for feed, generations := range h.store.feeds[ns] {
 		if feed == h.self {
 			continue
 		}
-		weight := h.rep.weight(feed)
+		weight := weights[feed]
 		newestAge := max(now.Sub(generations[len(generations)-1].BuiltAt), 0)
 		if newestAge <= policy.MaxAge {
 			covering++

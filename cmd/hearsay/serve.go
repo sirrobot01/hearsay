@@ -113,10 +113,11 @@ func serve(configPath, listen string) error {
 			}
 		}
 		node, err = transport.ListenWithConfig(transport.NodeConfig{
-			Dir:        filepath.Join(cfg.Dir, "swarm"),
-			Port:       cfg.Hearsay.Port,
-			GossipPort: cfg.Hearsay.GossipPort,
-			MaxStorage: cfg.Hearsay.MaxStorage,
+			Dir:                  filepath.Join(cfg.Dir, "swarm"),
+			Port:                 cfg.Hearsay.Port,
+			GossipPort:           cfg.Hearsay.GossipPort,
+			MaxStorage:           cfg.Hearsay.MaxStorage,
+			MaxFeedsPerNamespace: cfg.Hearsay.MaxFeeds,
 		})
 		if err != nil {
 			return err

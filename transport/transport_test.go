@@ -1,13 +1,13 @@
 package transport
 
 import (
-	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -56,8 +56,8 @@ func TestGossipExchange(t *testing.T) {
 	b[0] = 1
 	feedB := hex.EncodeToString(b)
 
-	n1 := &Node{known: map[string]map[string]struct{}{}}
-	n2 := &Node{known: map[string]map[string]struct{}{}}
+	n1 := &Node{known: map[string]map[string]*feedState{}}
+	n2 := &Node{known: map[string]map[string]*feedState{}}
 	n1.Track("ns.x")
 	n1.AddFeed("ns.x", feedA)
 	n2.Track("ns.x")
@@ -101,7 +101,7 @@ func TestAllowlistRejectsGossipedFeeds(t *testing.T) {
 	other[0] = 1
 	injected := hex.EncodeToString(other)
 
-	n1 := &Node{known: map[string]map[string]struct{}{}}
+	n1 := &Node{known: map[string]map[string]*feedState{}}
 	n1.Track("ns.x")
 	n1.Allow(followed)
 	if !n1.AddFeed("ns.x", followed) {
@@ -111,7 +111,7 @@ func TestAllowlistRejectsGossipedFeeds(t *testing.T) {
 		t.Fatal("key outside the allowlist accepted")
 	}
 
-	n2 := &Node{known: map[string]map[string]struct{}{}}
+	n2 := &Node{known: map[string]map[string]*feedState{}}
 	n2.Track("ns.x")
 	n2.AddFeed("ns.x", injected)
 
@@ -137,12 +137,12 @@ func TestAllowlistRejectsGossipedFeeds(t *testing.T) {
 // Discovery announces this node's address on a public topic, and with
 // an allowlist it could not act on what it learns anyway.
 func TestAllowlistDisablesDiscovery(t *testing.T) {
-	n := &Node{known: map[string]map[string]struct{}{}}
+	n := &Node{known: map[string]map[string]*feedState{}}
 	n.Track("ns.x")
 	n.Allow(hex.EncodeToString(make([]byte, 32)))
 	// gossip is nil, so Discover panics on the announce path if the
 	// allowlist does not short-circuit it first.
-	n.Discover(context.Background(), "ns.x")
+	n.Discover(t.Context(), "ns.x")
 }
 
 // TestPeerCountExcludesSelf checks the announced self key still reaches
@@ -154,7 +154,7 @@ func TestPeerCountExcludesSelf(t *testing.T) {
 	other[0] = 1
 	peer := hex.EncodeToString(other)
 
-	n := &Node{known: map[string]map[string]struct{}{}}
+	n := &Node{known: map[string]map[string]*feedState{}}
 	n.Track("ns.x")
 	n.Track("ns.empty")
 	n.Announce("ns.x", self)
@@ -200,4 +200,50 @@ func TestPruneStorageKeepsNewestProtectedBlob(t *testing.T) {
 	if _, err := os.Stat(newPath); err != nil {
 		t.Fatalf("protected blob removed: %v", err)
 	}
+}
+
+func TestFeedMetadataIsBoundedAndPinsSurvive(t *testing.T) {
+	n := &Node{known: map[string]map[string]*feedState{}, maxFeeds: 2}
+	pinned := testFeedID(1)
+	old := testFeedID(2)
+	newest := testFeedID(3)
+	if !n.PinFeed("ns.x", pinned) || !n.AddFeed("ns.x", old) || !n.AddFeed("ns.x", newest) {
+		t.Fatal("feed setup failed")
+	}
+	feeds := n.Feeds("ns.x")
+	if len(feeds) != 2 || !slices.Contains(feeds, pinned) || !slices.Contains(feeds, newest) {
+		t.Fatalf("bounded feeds = %v", feeds)
+	}
+}
+
+func TestFailingFeedBackoffAndQuarantine(t *testing.T) {
+	n := &Node{known: map[string]map[string]*feedState{}, maxFeeds: 2}
+	feed := testFeedID(1)
+	now := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	if !n.addFeedAt("ns.x", feed, false, now, now) {
+		t.Fatal("feed setup failed")
+	}
+	n.recordPullAt("ns.x", feed, false, now)
+	if got := n.readyFeedsAt("ns.x", now.Add(feedRetryBase-time.Second)); len(got) != 0 {
+		t.Fatalf("feed skipped no backoff: %v", got)
+	}
+	if got := n.readyFeedsAt("ns.x", now.Add(feedRetryBase)); len(got) != 1 {
+		t.Fatalf("feed did not become ready: %v", got)
+	}
+	n.recordPullAt("ns.x", feed, false, now.Add(feedRetryBase))
+	n.recordPullAt("ns.x", feed, false, now.Add(3*feedRetryBase))
+	if got := n.Feeds("ns.x"); len(got) != 0 {
+		t.Fatalf("quarantined feed advertised: %v", got)
+	}
+	quarantineEnd := now.Add(3*feedRetryBase + feedQuarantinePeriod)
+	n.pruneFeedsAt("ns.x", time.Time{}, quarantineEnd)
+	if !n.addFeedAt("ns.x", feed, false, quarantineEnd, quarantineEnd) {
+		t.Fatal("feed did not leave quarantine")
+	}
+}
+
+func testFeedID(last byte) string {
+	raw := make([]byte, 32)
+	raw[len(raw)-1] = last
+	return hex.EncodeToString(raw)
 }

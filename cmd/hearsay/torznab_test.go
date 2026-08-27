@@ -30,10 +30,13 @@ func TestDaemonLookupPreservesLocalNegative(t *testing.T) {
 
 func TestDefaultRankPolicy(t *testing.T) {
 	policy := torznab.DefaultRankPolicy()
-	if policy.Accepts(torznab.Claim{Support: 0.49, Sources: 1}) {
+	if policy.Accepts(torznab.Claim{Support: 0.49, EvidenceWeight: 1, Sources: 1}) {
 		t.Fatal("accepted a claim below the default threshold")
 	}
-	if !policy.Accepts(torznab.Claim{Support: 0.5, Sources: 1}) {
+	if !policy.Accepts(torznab.Claim{Support: 0.5, EvidenceWeight: 0.3, Sources: 1}) {
 		t.Fatal("rejected a claim at the default threshold")
+	}
+	if policy.Accepts(torznab.Claim{Support: 1, EvidenceWeight: 0.25, Sources: 5}) {
+		t.Fatal("accepted an unverified-pool-sized claim")
 	}
 }

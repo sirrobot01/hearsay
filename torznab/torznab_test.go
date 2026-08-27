@@ -34,8 +34,8 @@ const fixture = `<?xml version="1.0" encoding="UTF-8"?>
 
 func TestRewrite(t *testing.T) {
 	answers := map[string]Claim{
-		"aaaa": {Subject: "aaaa", Support: 0.1, Sources: 2, Coverage: 0.5},
-		"bbbb": {Subject: "bbbb", Support: 0.92, Sources: 4, Coverage: 0.8},
+		"aaaa": {Subject: "aaaa", Support: 0.1, EvidenceWeight: 0.1, Sources: 2, Coverage: 0.5},
+		"bbbb": {Subject: "bbbb", Support: 0.92, EvidenceWeight: 0.92, Sources: 4, Coverage: 0.8},
 	}
 	out := string(Rewrite([]byte(fixture), func(subjects []string) (map[string]Claim, error) {
 		if len(subjects) != 2 {
@@ -78,7 +78,7 @@ func TestRewritePassThrough(t *testing.T) {
 	}
 	broken := []byte(`<rss><channel><item><torznab:attr name="infohash" value="aa" /></item>`)
 	got := Rewrite(broken, func([]string) (map[string]Claim, error) {
-		return map[string]Claim{"aa": {Subject: "aa", Support: 1, Sources: 1}}, nil
+		return map[string]Claim{"aa": {Subject: "aa", Support: 1, EvidenceWeight: 1, Sources: 1}}, nil
 	})
 	if !strings.Contains(string(got), "hearsay_support") {
 		t.Fatal("valid prefix of truncated doc not annotated")
@@ -88,7 +88,7 @@ func TestRewritePassThrough(t *testing.T) {
 func TestRewriteDoesNotPromoteBelowThreshold(t *testing.T) {
 	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
 		return map[string]Claim{
-			"bbbb": {Subject: "bbbb", Support: 0.49, Sources: 1, Coverage: 1},
+			"bbbb": {Subject: "bbbb", Support: 0.49, EvidenceWeight: 1, Sources: 1, Coverage: 1},
 		}, nil
 	}))
 	if !strings.Contains(out, `name="hearsay_cached" value="true"`) {
@@ -104,7 +104,7 @@ func TestRewriteDoesNotPromoteBelowThreshold(t *testing.T) {
 func TestRewriteUsesConfiguredPolicy(t *testing.T) {
 	out := string(RewriteWithPolicy([]byte(fixture), func([]string) (map[string]Claim, error) {
 		return map[string]Claim{
-			"bbbb": {Subject: "bbbb", Support: 0.49, Sources: 1, Coverage: 1},
+			"bbbb": {Subject: "bbbb", Support: 0.49, EvidenceWeight: 1, Sources: 1, Coverage: 1},
 		}, nil
 	}, RankPolicy{MinSupport: 0.4, MinSources: 1, MaxAge: time.Hour}))
 	bIdx := strings.Index(out, "Release.B")
@@ -134,7 +134,7 @@ func TestRewriteDemotesLocalNegative(t *testing.T) {
 func TestRewriteDemotesDenied(t *testing.T) {
 	out := string(Rewrite([]byte(fixture), func([]string) (map[string]Claim, error) {
 		return map[string]Claim{
-			"aaaa": {Subject: "aaaa", Support: 0.8, Sources: 2, Coverage: 1, Denied: true},
+			"aaaa": {Subject: "aaaa", Support: 0.8, EvidenceWeight: 0.8, Sources: 2, Coverage: 1, Denied: true},
 		}, nil
 	}))
 	aIdx := strings.Index(out, "Release.A")
@@ -175,7 +175,7 @@ func TestProxyRewritesSearch(t *testing.T) {
 		Upstream: upstream.URL + "/",
 		Lookup: func([]string) (map[string]Claim, error) {
 			return map[string]Claim{
-				"bbbb": {Subject: "bbbb", Support: 0.9, Sources: 3, Coverage: 1},
+				"bbbb": {Subject: "bbbb", Support: 0.9, EvidenceWeight: 0.9, Sources: 3, Coverage: 1},
 			}, nil
 		},
 	}

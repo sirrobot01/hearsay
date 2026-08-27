@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -48,8 +49,12 @@ func (d testDomain) Verify(subject any, outcome any) Truth {
 
 func remoteGen(t *testing.T, h *Hearsay, id ed25519.PrivateKey, ns string, seq uint64, subjects map[string]float64, vt ValueType) {
 	t.Helper()
+	remoteGenAt(t, h, id, ns, seq, subjects, vt, time.Now())
+}
+
+func remoteGenAt(t *testing.T, h *Hearsay, id ed25519.PrivateKey, ns string, seq uint64, subjects map[string]float64, vt ValueType, now time.Time) {
+	t.Helper()
 	d := testDomain{ns, vt}
-	now := time.Now()
 	observations := make(map[Key]Observation, len(subjects))
 	for subject, value := range subjects {
 		key, _ := d.Encode(subject)
@@ -146,7 +151,7 @@ func TestReputationFeedback(t *testing.T) {
 	remoteGen(t, h, liar, "ns.bool", 1, claims, Bool)
 
 	feed := h.Feeds("ns.bool")[0]
-	if w := h.rep.weight(feed); w != 0.5 {
+	if w := h.rep.weight(feed); w != probationWeight {
 		t.Fatalf("initial weight = %v", w)
 	}
 	for _, s := range []string{"a", "b", "c", "d", "e"} {
@@ -154,13 +159,16 @@ func TestReputationFeedback(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if w := h.rep.weight(feed); w >= 0.2 {
-		t.Fatalf("weight after 5 disagreements = %v, want < 0.2", w)
+	if w := h.rep.weight(feed); w > 0.01 {
+		t.Fatalf("weight after 5 disagreements = %v, want <= 0.01", w)
 	}
 
 	a, _ := h.Query("ns.bool", "f")
 	if a.Value != 1 {
 		t.Fatalf("sole source still wins its own total, got %+v", a)
+	}
+	if a.EvidenceWeight > 0.01 {
+		t.Fatalf("failed source retained too much absolute influence: %+v", a)
 	}
 	if o, ok := h.store.truth["ns.bool"][sha256.Sum256([]byte("a"))]; !ok || o.Value != 0 {
 		t.Fatal("reported outcome not recorded as ground truth")
@@ -483,5 +491,53 @@ func TestForgetDropsFeed(t *testing.T) {
 	// reloads them.
 	if _, err := os.Stat(filepath.Join(dir, "feeds", feed, "ns.bool")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("generations still on disk: %v", err)
+	}
+}
+
+func TestPruneFeedsBeforeDropsStaleRemoteData(t *testing.T) {
+	dir := t.TempDir()
+	h, err := New(dir, testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	_, id, _ := ed25519.GenerateKey(nil)
+	remoteGenAt(t, h, id, "ns.bool", 1, map[string]float64{"abc": 1}, Bool, time.Now().Add(-48*time.Hour))
+	feed := hex.EncodeToString(id.Public().(ed25519.PublicKey))
+
+	removed, err := h.PruneFeedsBefore("ns.bool", time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != feed || len(h.Feeds("ns.bool")) != 0 {
+		t.Fatalf("removed = %v, feeds = %v", removed, h.Feeds("ns.bool"))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "feeds", feed, "ns.bool")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stale feed remains on disk: %v", err)
+	}
+}
+
+func TestRetainedFeedLimitKeepsNewest(t *testing.T) {
+	dir := t.TempDir()
+	h, err := New(dir, testDomain{"ns.bool", Bool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	now := time.Now()
+	var feeds []string
+	for i := range 3 {
+		_, id, _ := ed25519.GenerateKey(nil)
+		remoteGenAt(t, h, id, "ns.bool", 1, map[string]float64{"abc": 1}, Bool, now.Add(time.Duration(i-3)*time.Hour))
+		feeds = append(feeds, hex.EncodeToString(id.Public().(ed25519.PublicKey)))
+	}
+	if err := h.store.limitFeeds("ns.bool", h.self, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Feeds("ns.bool"); len(got) != 2 || slices.Contains(got, feeds[0]) {
+		t.Fatalf("feeds = %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "feeds", feeds[0], "ns.bool")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("oldest feed remains on disk: %v", err)
 	}
 }

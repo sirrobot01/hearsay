@@ -32,6 +32,7 @@ type Config struct {
 		Port       int      `yaml:"port"`
 		GossipPort int      `yaml:"gossip_port"`
 		MaxStorage int64    `yaml:"max_storage_bytes"`
+		MaxFeeds   int      `yaml:"max_feeds_per_namespace"`
 		Follow     []Follow `yaml:"follow"`
 	} `yaml:"hearsay"`
 	Adapters struct {
