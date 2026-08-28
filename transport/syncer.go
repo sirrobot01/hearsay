@@ -30,14 +30,8 @@ func (s *Syncer) Run(ctx context.Context) {
 	if s.Log == nil {
 		s.Log = slog.Default()
 	}
-	self := hex.EncodeToString(s.Engine.Identity())
 	for ns := range s.namespaces() {
 		s.Node.Track(ns)
-		// A publisher advertises its own feed, or gossip has nothing
-		// to spread.
-		if s.Publish {
-			s.Node.Announce(ns, self)
-		}
 	}
 	for {
 		s.sync(ctx)
@@ -146,7 +140,9 @@ func (s *Syncer) publish(ctx context.Context, ns, self string) {
 	defer cancel()
 	if err := s.Node.PutPointer(putCtx, s.Engine.PrivateIdentity(), ns, ptr); err != nil {
 		s.Log.Warn("pointer publish failed", "ns", ns, "err", err)
+		return
 	}
+	s.Node.Announce(ns, self)
 }
 
 // fetchTimeout budgets one attempt at a generation blob. A publisher

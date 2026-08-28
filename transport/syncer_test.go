@@ -126,3 +126,27 @@ func TestSyncStopsOnCancel(t *testing.T) {
 		t.Fatal("sync did not return on a cancelled context")
 	}
 }
+
+func TestEmptyPublisherDoesNotAdvertiseFeed(t *testing.T) {
+	d := debrid.New(debrid.RealDebrid)
+	engine, err := hearsay.New(t.TempDir(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	n := &Node{known: map[string]map[string]*feedState{}}
+	s := &Syncer{
+		Engine:  engine,
+		Node:    n,
+		Publish: true,
+		Log:     slog.New(slog.DiscardHandler),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	s.Run(ctx)
+
+	if feeds := n.Feeds(d.Namespace()); len(feeds) != 0 {
+		t.Fatalf("empty publisher advertised feeds: %v", feeds)
+	}
+}
