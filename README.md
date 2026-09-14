@@ -56,6 +56,7 @@ hearsay:
   gossip_port: 0       # discovery listen port; 0 = random
   max_storage_bytes: 1073741824 # cap relayed generation blobs at 1 GiB
   max_feeds_per_namespace: 256  # bound discovered publisher metadata
+  max_seeded_torrents: 256      # limit retained generation swarms
   follow: []           # empty = discover; non-empty = publisher allowlist
 adapters:
   debrid: [realdebrid] # activates cached and uncached namespaces
@@ -68,6 +69,8 @@ Omitting `participate` or `publish` keeps it enabled. Omitting an adapter list e
 `participate: true, publish: false` is reader/relay mode: your IP joins the selected public namespace topics, fetched generations are relayed, and your observations remain local. Set `participate: false` for local-only mode. The legacy `enabled` key remains accepted as a participation override.
 
 `hearsay status` shows the effective participation mode, active namespaces, query coverage, verified source accuracy, retry/quarantine counts, and bounded swarm storage. Engine counters persist locally across restarts.
+
+`max_seeded_torrents` limits the number of retained generation swarms. The default is `256`. Zero selects the default. The node closes the oldest idle swarms first. Their files remain on disk for reuse. Active transfers can exceed this limit. The node checks again each minute. `max_storage_bytes` separately limits files on disk. `max_feeds_per_namespace` limits publisher metadata.
 
 Built-in adapters are debrid cache/uncached evidence by provider, usenet completeness by backbone, and `torrent.public.availability` for terminal public-torrent completion ratios. The torrent adapter accepts only outcomes from real terminal attempts; never feed it live samples, cancellations, or probes.
 

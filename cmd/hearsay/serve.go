@@ -134,6 +134,7 @@ func serve(configPath, listen string) (result error) {
 			GossipPort:           cfg.Hearsay.GossipPort,
 			MaxStorage:           cfg.Hearsay.MaxStorage,
 			MaxFeedsPerNamespace: cfg.Hearsay.MaxFeeds,
+			MaxSeededTorrents:    cfg.Hearsay.MaxSeeded,
 		})
 		if err != nil {
 			return err

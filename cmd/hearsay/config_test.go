@@ -63,6 +63,20 @@ func TestConfigSupportsReaderRelayMode(t *testing.T) {
 	}
 }
 
+func TestConfigAcceptsSeededTorrentLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("hearsay:\n  max_seeded_torrents: 64\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Hearsay.MaxSeeded != 64 {
+		t.Fatalf("seeded torrent limit = %d, want 64", cfg.Hearsay.MaxSeeded)
+	}
+}
+
 func TestLegacyConfigRetainsNetworkDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("hearsay:\n  enabled: true\n"), 0o644); err != nil {

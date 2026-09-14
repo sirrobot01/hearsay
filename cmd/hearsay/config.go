@@ -45,6 +45,7 @@ type NetworkConfig struct {
 	GossipPort  int      `yaml:"gossip_port"`
 	MaxStorage  int64    `yaml:"max_storage_bytes"`
 	MaxFeeds    int      `yaml:"max_feeds_per_namespace"`
+	MaxSeeded   int      `yaml:"max_seeded_torrents"`
 	Follow      []Follow `yaml:"follow"`
 }
 

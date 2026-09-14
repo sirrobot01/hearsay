@@ -37,6 +37,9 @@ const MaxGenerationSize = 64 << 20
 // DefaultMaxStorage bounds generation blobs retained for relay.
 const DefaultMaxStorage = 1 << 30
 
+// DefaultMaxSeededTorrents limits retained swarms. Active transfers can exceed it.
+const DefaultMaxSeededTorrents = 256
+
 // DefaultMaxFeedsPerNamespace bounds publisher metadata retained per namespace.
 const DefaultMaxFeedsPerNamespace = 256
 
@@ -64,12 +67,15 @@ type Node struct {
 	gossip     net.Listener
 	maxStorage int64
 	maxFeeds   int
+	maxSeeded  int
 
 	mu        sync.Mutex
 	storageMu sync.Mutex
 	self      string
 	known     map[string]map[string]*feedState
-	allow     map[string]struct{} // nil = accept any discovered key
+	allow     map[string]struct{}            // nil = accept any discovered key
+	seeded    map[*torrent.Torrent]time.Time // guarded by storageMu
+	fetching  map[*torrent.Torrent]int       // guarded by storageMu
 }
 
 type NodeConfig struct {
@@ -78,6 +84,9 @@ type NodeConfig struct {
 	GossipPort           int
 	MaxStorage           int64
 	MaxFeedsPerNamespace int
+	// MaxSeededTorrents bounds retained swarms. Zero selects the default.
+	// Active transfers can exceed this limit until they become idle.
+	MaxSeededTorrents int
 }
 
 // Listen starts the swarm client, its DHT servers, and the gossip
@@ -95,6 +104,9 @@ func ListenWithConfig(config NodeConfig) (*Node, error) {
 	if config.MaxFeedsPerNamespace < 0 {
 		return nil, fmt.Errorf("transport: max feeds must not be negative")
 	}
+	if config.MaxSeededTorrents < 0 {
+		return nil, fmt.Errorf("transport: max seeded torrents must not be negative")
+	}
 	if err := os.MkdirAll(config.Dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -111,13 +123,19 @@ func ListenWithConfig(config NodeConfig) (*Node, error) {
 		client:     client,
 		maxStorage: config.MaxStorage,
 		maxFeeds:   config.MaxFeedsPerNamespace,
+		maxSeeded:  config.MaxSeededTorrents,
 		known:      map[string]map[string]*feedState{},
+		seeded:     map[*torrent.Torrent]time.Time{},
+		fetching:   map[*torrent.Torrent]int{},
 	}
 	if n.maxStorage == 0 {
 		n.maxStorage = DefaultMaxStorage
 	}
 	if n.maxFeeds == 0 {
 		n.maxFeeds = DefaultMaxFeedsPerNamespace
+	}
+	if n.maxSeeded == 0 {
+		n.maxSeeded = DefaultMaxSeededTorrents
 	}
 	for _, s := range client.DhtServers() {
 		if w, ok := s.(torrent.AnacrolixDhtServerWrapper); ok {
@@ -134,12 +152,33 @@ func ListenWithConfig(config NodeConfig) (*Node, error) {
 		return nil, err
 	}
 	go n.serveGossip()
+	go func() {
+		tick := time.Tick(time.Minute)
+		for {
+			select {
+			case <-client.Closed():
+				return
+			case <-tick:
+				n.storageMu.Lock()
+				n.pruneSeededLocked(nil)
+				n.storageMu.Unlock()
+			}
+		}
+	}()
 	return n, nil
 }
 
 func (n *Node) Close() error {
+	n.storageMu.Lock()
+	defer n.storageMu.Unlock()
+	select {
+	case <-n.client.Closed():
+		return nil
+	default:
+	}
 	n.gossip.Close()
 	n.client.Close()
+	clear(n.seeded)
 	return nil
 }
 
@@ -377,6 +416,7 @@ type Stats struct {
 	StoredBytes          int64          `json:"stored_bytes"`
 	MaxStorage           int64          `json:"max_storage_bytes"`
 	MaxFeedsPerNamespace int            `json:"max_feeds_per_namespace"`
+	MaxSeededTorrents    int            `json:"max_seeded_torrents"`
 	Torrents             []TorrentStat  `json:"torrents"`
 	Feeds                map[string]int `json:"feeds"`
 	RetryingFeeds        map[string]int `json:"retrying_feeds"`
@@ -388,6 +428,7 @@ func (n *Node) Stats() Stats {
 		SwarmPort:            n.client.LocalPort(),
 		MaxStorage:           n.maxStorage,
 		MaxFeedsPerNamespace: n.maxFeeds,
+		MaxSeededTorrents:    n.maxSeeded,
 		Feeds:                map[string]int{},
 		RetryingFeeds:        map[string]int{},
 		QuarantinedFeeds:     map[string]int{},
@@ -395,10 +436,12 @@ func (n *Node) Stats() Stats {
 	if a, ok := n.gossip.Addr().(*net.TCPAddr); ok {
 		s.GossipPort = a.Port
 	}
-	for _, t := range n.client.Torrents() {
+	torrents := n.client.Torrents()
+	s.Torrents = make([]TorrentStat, 0, len(torrents))
+	for _, t := range torrents {
 		st := TorrentStat{
 			InfoHash:    t.InfoHash().HexString(),
-			ActivePeers: t.Stats().ActivePeers,
+			ActivePeers: len(t.PeerConns()),
 		}
 		if t.Info() != nil {
 			st.Size = t.Length()
@@ -442,6 +485,11 @@ func (n *Node) peersLocked(ns string) int {
 func (n *Node) Seed(blob []byte) (metainfo.Hash, error) {
 	n.storageMu.Lock()
 	defer n.storageMu.Unlock()
+	select {
+	case <-n.client.Closed():
+		return metainfo.Hash{}, net.ErrClosed
+	default:
+	}
 
 	sum := sha256.Sum256(blob)
 	name := hex.EncodeToString(sum[:]) + ".gen"
@@ -466,6 +514,8 @@ func (n *Node) Seed(blob []byte) (metainfo.Hash, error) {
 	}
 	<-t.GotInfo()
 	t.DownloadAll()
+	n.seeded[t] = time.Now()
+	n.pruneSeededLocked(t)
 	if err := n.pruneStorageLocked(name); err != nil {
 		return metainfo.Hash{}, err
 	}
@@ -479,15 +529,36 @@ func (n *Node) Fetch(ctx context.Context, infohash string) ([]byte, error) {
 	if err := ih.FromHexString(infohash); err != nil {
 		return nil, err
 	}
+	n.storageMu.Lock()
+	select {
+	case <-n.client.Closed():
+		n.storageMu.Unlock()
+		return nil, net.ErrClosed
+	default:
+	}
 	t, _ := n.client.AddTorrentInfoHash(ih)
+	n.fetching[t]++
+	n.storageMu.Unlock()
+	defer func() {
+		n.storageMu.Lock()
+		n.fetching[t]--
+		if n.fetching[t] == 0 {
+			delete(n.fetching, t)
+			if _, retained := n.seeded[t]; !retained {
+				t.Drop()
+			}
+		}
+		n.pruneSeededLocked(nil)
+		n.storageMu.Unlock()
+	}()
 	select {
 	case <-t.GotInfo():
+	case <-t.Closed():
+		return nil, net.ErrClosed
 	case <-ctx.Done():
-		t.Drop()
 		return nil, ctx.Err()
 	}
 	if t.Length() > MaxGenerationSize || t.Info().IsDir() {
-		t.Drop()
 		return nil, fmt.Errorf("transport: not a generation blob: %d bytes", t.Length())
 	}
 	t.DownloadAll()
@@ -496,8 +567,9 @@ func (n *Node) Fetch(ctx context.Context, infohash string) ([]byte, error) {
 	for t.BytesCompleted() < t.Length() {
 		select {
 		case <-ticker.C:
+		case <-t.Closed():
+			return nil, net.ErrClosed
 		case <-ctx.Done():
-			t.Drop()
 			return nil, ctx.Err()
 		}
 	}
@@ -514,6 +586,12 @@ func (n *Node) Fetch(ctx context.Context, infohash string) ([]byte, error) {
 		name = ""
 	}
 	n.storageMu.Lock()
+	select {
+	case <-t.Closed():
+		n.storageMu.Unlock()
+		return nil, net.ErrClosed
+	default:
+	}
 	if name != "" {
 		now := time.Now()
 		if err := os.Chtimes(filepath.Join(n.dir, name), now, now); err != nil {
@@ -522,8 +600,45 @@ func (n *Node) Fetch(ctx context.Context, infohash string) ([]byte, error) {
 		}
 	}
 	err = n.pruneStorageLocked(name)
+	n.seeded[t] = time.Now()
 	n.storageMu.Unlock()
 	return raw, err
+}
+
+// pruneSeededLocked drops old, idle swarms but keeps their files for reuse.
+// Callers must hold storageMu. A fetch keeps its swarm until its reader closes.
+func (n *Node) pruneSeededLocked(protected *torrent.Torrent) {
+	for t := range n.seeded {
+		select {
+		case <-t.Closed():
+			delete(n.seeded, t)
+		default:
+		}
+	}
+	limit := n.maxSeeded
+	if limit == 0 {
+		limit = DefaultMaxSeededTorrents
+	}
+	if len(n.seeded) <= limit {
+		return
+	}
+	idle := make([]*torrent.Torrent, 0, len(n.seeded))
+	for t := range n.seeded {
+		if t != protected && n.fetching[t] == 0 && t.Info() != nil &&
+			t.BytesCompleted() == t.Length() && len(t.PeerConns()) == 0 {
+			idle = append(idle, t)
+		}
+	}
+	slices.SortFunc(idle, func(a, b *torrent.Torrent) int {
+		return n.seeded[a].Compare(n.seeded[b])
+	})
+	for _, t := range idle {
+		if len(n.seeded) <= limit {
+			break
+		}
+		t.Drop()
+		delete(n.seeded, t)
+	}
 }
 
 type storageEntry struct {
@@ -592,11 +707,12 @@ func (n *Node) pruneStorageLocked(protected string) error {
 		if n.client != nil {
 			for _, t := range n.client.Torrents() {
 				if info := t.Info(); info != nil && info.Name == file.name {
-					if t.Stats().ActivePeers > 0 || t.BytesCompleted() < t.Length() {
+					if n.fetching[t] > 0 || len(t.PeerConns()) > 0 || t.BytesCompleted() < t.Length() {
 						inUse = true
 						break
 					}
 					t.Drop()
+					delete(n.seeded, t)
 					break
 				}
 			}

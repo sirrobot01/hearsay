@@ -114,6 +114,7 @@ func status(base, token string, all bool) error {
 	fmt.Fprintf(w, "Swarm port\t%d\n", st.Transport.SwarmPort)
 	fmt.Fprintf(w, "Gossip port\t%d\n", st.Transport.GossipPort)
 	fmt.Fprintf(w, "Swarm storage\t%s / %s\n", humanSize(st.Transport.StoredBytes), humanSize(st.Transport.MaxStorage))
+	fmt.Fprintf(w, "Retained swarm limit\t%d\n", st.Transport.MaxSeededTorrents)
 	var retrying, quarantined int
 	for _, count := range st.Transport.RetryingFeeds {
 		retrying += count
