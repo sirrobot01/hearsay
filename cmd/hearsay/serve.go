@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -128,6 +129,10 @@ func serve(configPath, listen string) (result error) {
 				return err
 			}
 		}
+		var blocked []netip.Prefix
+		if blocked, err = transport.ParseBlockedPeers(cfg.Hearsay.BlockPrivatePeers, cfg.Hearsay.Blocklist); err != nil {
+			return err
+		}
 		node, err = transport.ListenWithConfig(transport.NodeConfig{
 			Dir:                  filepath.Join(cfg.Dir, "swarm"),
 			Port:                 cfg.Hearsay.Port,
@@ -135,6 +140,7 @@ func serve(configPath, listen string) (result error) {
 			MaxStorage:           cfg.Hearsay.MaxStorage,
 			MaxFeedsPerNamespace: cfg.Hearsay.MaxFeeds,
 			MaxSeededTorrents:    cfg.Hearsay.MaxSeeded,
+			BlockedPeers:         blocked,
 		})
 		if err != nil {
 			return err

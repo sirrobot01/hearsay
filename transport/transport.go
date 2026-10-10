@@ -16,6 +16,7 @@ import (
 	"io"
 	"maps"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,6 +28,7 @@ import (
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
+	"github.com/anacrolix/torrent/iplist"
 	"github.com/anacrolix/torrent/metainfo"
 )
 
@@ -68,6 +70,7 @@ type Node struct {
 	maxStorage int64
 	maxFeeds   int
 	maxSeeded  int
+	blocked    peerBlocklist
 
 	mu        sync.Mutex
 	storageMu sync.Mutex
@@ -87,7 +90,72 @@ type NodeConfig struct {
 	// MaxSeededTorrents bounds retained swarms. Zero selects the default.
 	// Active transfers can exceed this limit until they become idle.
 	MaxSeededTorrents int
+	// BlockedPeers lists address ranges the node never connects to: swarm
+	// peers, DHT nodes, and gossip partners. PrivatePeerPrefixes holds the
+	// ranges that are unreachable across the public internet.
+	BlockedPeers []netip.Prefix
 }
+
+// PrivatePeerPrefixes are the address ranges that a public peer can never
+// have: RFC 1918, CGNAT, link-local, loopback, and IPv6 unique local. Behind
+// a VPN, DHT returns such addresses from the provider's internal network.
+var PrivatePeerPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("::1/128"),
+}
+
+// ParseBlockedPeers returns the prefixes for NodeConfig.BlockedPeers:
+// PrivatePeerPrefixes when private is set, followed by each CIDR in cidrs.
+func ParseBlockedPeers(private bool, cidrs []string) ([]netip.Prefix, error) {
+	var prefixes []netip.Prefix
+	if private {
+		prefixes = slices.Clone(PrivatePeerPrefixes)
+	}
+	for _, cidr := range cidrs {
+		p, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+		if err != nil {
+			return nil, fmt.Errorf("transport: blocked peer range %q: %w", cidr, err)
+		}
+		prefixes = append(prefixes, p)
+	}
+	return prefixes, nil
+}
+
+// peerBlocklist implements iplist.Ranger over CIDR prefixes. A linear scan
+// is fine for a handful of prefixes and, unlike iplist.IPList, tolerates
+// overlapping ranges.
+type peerBlocklist []netip.Prefix
+
+func (b peerBlocklist) blocks(ip net.IP) bool {
+	_, ok := b.Lookup(ip)
+	return ok
+}
+
+func (b peerBlocklist) Lookup(ip net.IP) (iplist.Range, bool) {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return iplist.Range{}, false
+	}
+	addr = addr.Unmap()
+	for _, p := range b {
+		if !p.Contains(addr) {
+			continue
+		}
+		p = p.Masked()
+		last := iplist.IPNetLast(&net.IPNet{IP: p.Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), p.Addr().BitLen())})
+		return iplist.Range{First: p.Addr().AsSlice(), Last: last, Description: "blocked peer range " + p.String()}, true
+	}
+	return iplist.Range{}, false
+}
+
+func (b peerBlocklist) NumRanges() int { return len(b) }
 
 // Listen starts the swarm client, its DHT servers, and the gossip
 // listener. dir stores generation blobs for seeding. Ports of 0 pick
@@ -114,6 +182,11 @@ func ListenWithConfig(config NodeConfig) (*Node, error) {
 	cfg.DataDir = config.Dir
 	cfg.Seed = true
 	cfg.ListenPort = config.Port
+	blocked := peerBlocklist(config.BlockedPeers)
+	if len(blocked) > 0 {
+		// The client hands this list to its DHT servers as well.
+		cfg.IPBlocklist = blocked
+	}
 	client, err := torrent.NewClient(cfg)
 	if err != nil {
 		return nil, err
@@ -124,6 +197,7 @@ func ListenWithConfig(config NodeConfig) (*Node, error) {
 		maxStorage: config.MaxStorage,
 		maxFeeds:   config.MaxFeedsPerNamespace,
 		maxSeeded:  config.MaxSeededTorrents,
+		blocked:    blocked,
 		known:      map[string]map[string]*feedState{},
 		seeded:     map[*torrent.Torrent]time.Time{},
 		fetching:   map[*torrent.Torrent]int{},
@@ -758,6 +832,9 @@ func (n *Node) Discover(ctx context.Context, ns string) {
 					break drain
 				}
 				for _, peer := range pv.Peers {
+					if n.blocked.blocks(peer.IP) {
+						continue
+					}
 					addr := net.JoinHostPort(peer.IP.String(), strconv.Itoa(peer.Port))
 					if _, dup := seen[addr]; dup || peer.Port == 0 || len(seen) >= discoveryMaxPeers {
 						continue

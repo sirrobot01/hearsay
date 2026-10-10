@@ -58,6 +58,8 @@ hearsay:
   max_feeds_per_namespace: 256  # bound discovered publisher metadata
   max_seeded_torrents: 256      # limit retained generation swarms
   follow: []           # empty = discover; non-empty = publisher allowlist
+  block_private_peers: false # skip RFC 1918, CGNAT, link-local and loopback peers
+  blocklist: []        # extra CIDR ranges to skip, e.g. ["203.0.113.0/24"]
 adapters:
   debrid: [realdebrid] # activates cached and uncached namespaces
   usenet: []
@@ -69,6 +71,8 @@ Omitting `participate` or `publish` keeps it enabled. Omitting an adapter list e
 `participate: true, publish: false` is reader/relay mode: your IP joins the selected public namespace topics, fetched generations are relayed, and your observations remain local. Set `participate: false` for local-only mode. The legacy `enabled` key remains accepted as a participation override.
 
 `hearsay status` shows the effective participation mode, active namespaces, query coverage, verified source accuracy, retry/quarantine counts, and bounded swarm storage. Engine counters persist locally across restarts.
+
+`block_private_peers` stops the node from connecting to private addresses. It covers swarm peers, DHT nodes, and gossip partners. The ranges are RFC 1918, CGNAT (`100.64.0.0/10`), link-local, loopback, and IPv6 unique local. Use it behind a VPN. There, DHT can return addresses from the VPN provider's internal network. `blocklist` adds more CIDR ranges. Both default to off.
 
 `max_seeded_torrents` limits the number of retained generation swarms. The default is `256`. Zero selects the default. The node closes the oldest idle swarms first. Their files remain on disk for reuse. Active transfers can exceed this limit. The node checks again each minute. `max_storage_bytes` separately limits files on disk. `max_feeds_per_namespace` limits publisher metadata.
 

@@ -247,3 +247,50 @@ func testFeedID(last byte) string {
 	raw[len(raw)-1] = last
 	return hex.EncodeToString(raw)
 }
+
+func TestPrivatePeerBlocklist(t *testing.T) {
+	blocked := peerBlocklist(PrivatePeerPrefixes)
+	for ip, want := range map[string]bool{
+		"10.101.4.2":        true,
+		"172.20.0.1":        true,
+		"192.168.1.10":      true,
+		"100.100.0.1":       true,
+		"127.0.0.1":         true,
+		"::ffff:10.106.0.7": true,
+		"fd00::1":           true,
+		"fe80::1":           true,
+		"::1":               true,
+		"8.8.8.8":           false,
+		"172.32.0.1":        false,
+		"100.128.0.1":       false,
+		"2001:4860::8888":   false,
+	} {
+		if got := blocked.blocks(net.ParseIP(ip)); got != want {
+			t.Errorf("blocks(%s) = %v, want %v", ip, got, want)
+		}
+	}
+
+	r, ok := blocked.Lookup(net.ParseIP("10.101.4.2"))
+	if !ok || !r.First.Equal(net.ParseIP("10.0.0.0")) || !r.Last.Equal(net.ParseIP("10.255.255.255")) {
+		t.Errorf("Lookup(10.101.4.2) = %v, %v; want 10.0.0.0-10.255.255.255", r, ok)
+	}
+	if peerBlocklist(nil).blocks(net.ParseIP("10.0.0.1")) {
+		t.Error("empty blocklist blocks an address")
+	}
+}
+
+func TestParseBlockedPeers(t *testing.T) {
+	got, err := ParseBlockedPeers(true, []string{" 203.0.113.0/24 "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(PrivatePeerPrefixes)+1 || got[len(got)-1].String() != "203.0.113.0/24" {
+		t.Fatalf("ParseBlockedPeers = %v", got)
+	}
+	if got, err := ParseBlockedPeers(false, nil); err != nil || got != nil {
+		t.Fatalf("ParseBlockedPeers(false, nil) = %v, %v; want nil, nil", got, err)
+	}
+	if _, err := ParseBlockedPeers(false, []string{"10.0.0.1"}); err == nil {
+		t.Fatal("ParseBlockedPeers accepted an address without a prefix length")
+	}
+}

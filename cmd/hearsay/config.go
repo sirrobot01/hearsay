@@ -47,6 +47,9 @@ type NetworkConfig struct {
 	MaxFeeds    int      `yaml:"max_feeds_per_namespace"`
 	MaxSeeded   int      `yaml:"max_seeded_torrents"`
 	Follow      []Follow `yaml:"follow"`
+	// BlockPrivatePeers skips peers in transport.PrivatePeerPrefixes.
+	BlockPrivatePeers bool     `yaml:"block_private_peers"`
+	Blocklist         []string `yaml:"blocklist"`
 }
 
 func (c NetworkConfig) Participates() bool {
